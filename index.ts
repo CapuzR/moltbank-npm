@@ -45,7 +45,7 @@ function getAppBaseUrl(cfg: any): string {
   return (
     cfg?.appBaseUrl ||
     process.env.APP_BASE_URL ||
-    "https://nebraska-depth-platform-try.trycloudflare.com"
+    "https://app.moltbank.bot"
   ).trim();
 }
 
