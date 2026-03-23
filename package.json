@@ -1,0 +1,18 @@
+{
+    "name": "@moltbank/moltbank",
+    "version": "1.0.0",
+    "description": "MoltBank OpenClaw plugin",
+    "main": "index.ts",
+    "openclaw": {
+        "extensions": [
+            "./index.ts"
+        ]
+    },
+    "keywords": [],
+    "author": "",
+    "license": "ISC",
+    "type": "module",
+    "devDependencies": {
+        "@types/node": "^25.5.0"
+    }
+}
