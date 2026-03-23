@@ -8,6 +8,7 @@ import {
 } from "fs";
 import { join, dirname } from "path";
 import { homedir } from "os";
+const IS_WIN = process.platform === "win32";
 
 function run(cmd: string, opts: { cwd?: string; silent?: boolean } = {}) {
   try {
@@ -15,7 +16,7 @@ function run(cmd: string, opts: { cwd?: string; silent?: boolean } = {}) {
       cwd: opts.cwd,
       stdio: opts.silent ? "pipe" : "inherit",
       env: { ...process.env },
-      shell: "/bin/bash",
+      shell: IS_WIN ? (process.env.ComSpec ?? "cmd.exe") : "/bin/bash",
     });
     return { ok: true, stdout: out?.toString().trim() ?? "" };
   } catch (e: any) {
@@ -28,7 +29,7 @@ function run(cmd: string, opts: { cwd?: string; silent?: boolean } = {}) {
 }
 
 function hasBin(bin: string) {
-  return run(`which ${bin}`, { silent: true }).ok;
+  return run(IS_WIN ? `where ${bin}` : `which ${bin}`, { silent: true }).ok;
 }
 
 function getWorkspace(): string {
@@ -131,6 +132,7 @@ function ensureSkillInstalled(
   appBaseUrl: string,
   skillName: string,
   api: any,
+  mode: "sandbox" | "host" = "sandbox",
 ) {
   const successFlag = join(skillDir, ".install_success");
   if (existsSync(successFlag)) {
@@ -142,6 +144,64 @@ function ensureSkillInstalled(
   mkdirSync(skillDir, { recursive: true });
 
   const workspaceOverride = dirname(dirname(skillDir));
+
+  if (IS_WIN && mode === "host") {
+    const files = [
+      "skill.md",
+      "setup.md",
+      "onboarding.md",
+      "multi-org.md",
+      "tools-reference.md",
+      "x402-workflow.md",
+      "heartbeat.md",
+      "rules.md",
+      "skill.json",
+      "polymarket-workflow.md",
+      "polymarket-operation.md",
+      "polymarket-refill.md",
+      "openclaw-signer-eoa.md",
+      "openclaw-solana-signer.md",
+      "pumpfun-workflow.md",
+      "config/mcporter.json",
+      "scripts/openclaw-runtime-config.mjs",
+      "scripts/request-oauth-device-code.mjs",
+      "scripts/init-openclaw-signer.mjs",
+      "scripts/init-openclaw-solana-signer.mjs",
+      "scripts/bootstrap-openclaw-pumpfun-wallet.mjs",
+      "scripts/inspect-x402-requirements.mjs",
+      "scripts/inspect-solana-wallet.mjs",
+      "scripts/inspect-polygon-wallet.mjs",
+      "scripts/quote-solana-budget.mjs",
+      "scripts/polymarket-execute-lifi-tx.mjs",
+      "scripts/polymarket-signer-to-safe.mjs",
+      "scripts/poll-oauth-token.mjs",
+      "scripts/export-api-key.mjs",
+      "scripts/fetch-openrouter-intent.mjs",
+      "scripts/x402-pay-and-confirm.mjs",
+      "scripts/pumpportal-trade-local.mjs",
+      "scripts/moltbank.sh",
+      "scripts/moltbank.ps1",
+      "scripts/polymarket-service.mjs",
+    ];
+    const filesJson = JSON.stringify(files).replace(/"/g, '\\"');
+    const installNode = run(
+      `node --input-type=module -e "import fs from 'fs'; import path from 'path'; const baseRaw=process.argv[1]; const dir=process.argv[2]; const files=JSON.parse(process.argv[3]); const base=baseRaw.endsWith('/') ? baseRaw.slice(0,-1) : baseRaw; fs.mkdirSync(dir,{recursive:true}); for (const f of files){ const u=base+'/'+f; const out=path.join(dir,f); fs.mkdirSync(path.dirname(out),{recursive:true}); const r=await fetch(u); if(!r.ok){ console.error('download failed',u,r.status); process.exit(2);} fs.writeFileSync(out, await r.text(),'utf8'); } fs.writeFileSync(path.join(dir,'.install_success'),'ok\\n','utf8');" "${appBaseUrl}" "${skillDir}" "${filesJson}"`,
+      { cwd: dirname(skillDir), silent: true },
+    );
+    if (installNode.ok) {
+      api.logger.info(
+        "[moltbank] ✓ skill installed at " +
+          skillDir +
+          " (windows direct download)",
+      );
+      return true;
+    }
+    api.logger.warn(
+      "[moltbank] ✗ skill install failed (windows direct download): " +
+        installNode.stderr,
+    );
+    return false;
+  }
 
   // FIX: rm -f antes del curl para evitar "Failure writing output to destination"
   // cuando /tmp/moltbank-install.sh ya existe con permisos bloqueados
@@ -183,7 +243,9 @@ function ensureSkillFilesUppercase(skillDir: string, api: any) {
 function fixSkillFrontmatter(skillDir: string, skillName: string, api: any) {
   const skillFile = join(skillDir, "SKILL.md");
   if (!existsSync(skillFile)) {
-    api.logger.warn("[moltbank] ✗ SKILL.md not found — skipping frontmatter fix");
+    api.logger.warn(
+      "[moltbank] ✗ SKILL.md not found — skipping frontmatter fix",
+    );
     return;
   }
 
@@ -194,11 +256,12 @@ function fixSkillFrontmatter(skillDir: string, skillName: string, api: any) {
     return;
   }
 
+  const bins = IS_WIN ? '["mcporter"]' : '["mcporter", "jq"]';
   const newFrontmatter = `---
 name: ${skillName}
 version: 1.5.2
 description: MCP skill for MoltBank business banking workflows (treasury, approvals, allowances, x402, OpenRouter, Polymarket, and Pump.Fun).
-metadata: {"openclaw": {"requires": {"bins": ["mcporter", "jq"]}, "primaryEnv": "MOLTBANK"}}
+metadata: {"openclaw": {"requires": {"bins": ${bins}}, "primaryEnv": "MOLTBANK"}}
 ---`;
 
   const body = content.slice(frontmatterMatch[0].length);
@@ -206,13 +269,20 @@ metadata: {"openclaw": {"requires": {"bins": ["mcporter", "jq"]}, "primaryEnv": 
 
   if (fixed !== content) {
     writeFileSync(skillFile, fixed, "utf8");
-    api.logger.info(`[moltbank] ✓ SKILL.md frontmatter fixed → name: ${skillName}`);
+    api.logger.info(
+      `[moltbank] ✓ SKILL.md frontmatter fixed → name: ${skillName}`,
+    );
   } else {
     api.logger.info("[moltbank] ✓ SKILL.md frontmatter already correct");
   }
 }
 
 function ensureSkillPermissions(skillDir: string, api: any) {
+  if (IS_WIN) {
+    api.logger.info("[moltbank] ✓ skipping unix permissions (Windows)");
+    return;
+  }
+
   const configDir = join(skillDir, "config");
   const configFile = join(skillDir, "config", "mcporter.json");
   const scriptsDir = join(skillDir, "scripts");
@@ -234,22 +304,32 @@ function ensureSkillPermissions(skillDir: string, api: any) {
   if (existsSync(scriptsDir)) {
     run(`chmod -R 755 "${scriptsDir}"`, { silent: true });
     api.logger.info("[moltbank] ✓ scripts/ permissions → 755");
-    // Normalizar line endings CRLF → LF en todos los scripts
-    // Evita el error: /usr/bin/env: 'bash\r': No such file or directory
-    run(`find "${scriptsDir}" -type f | xargs sed -i 's/\r$//'`, { silent: true });
-    api.logger.info("[moltbank] ✓ scripts/ line endings normalized (CRLF → LF)");
+    run(`find "${scriptsDir}" -type f | xargs sed -i 's/\r$//'`, {
+      silent: true,
+    });
+    api.logger.info(
+      "[moltbank] ✓ scripts/ line endings normalized (CRLF → LF)",
+    );
   }
 
-  // Normalizar line endings en todos los .md del skill dir
   if (existsSync(skillDir)) {
-    run(`find "${skillDir}" -maxdepth 1 -name "*.md" | xargs sed -i 's/\r$//'`, { silent: true });
-    api.logger.info("[moltbank] ✓ .md files line endings normalized (CRLF → LF)");
+    run(
+      `find "${skillDir}" -maxdepth 1 -name "*.md" | xargs sed -i 's/\r$//'`,
+      { silent: true },
+    );
+    api.logger.info(
+      "[moltbank] ✓ .md files line endings normalized (CRLF → LF)",
+    );
   }
 }
 
 // ─── npm deps ─────────────────────────────────────────────────────────────────
 
-function ensureNpmDeps(skillDir: string, api: any) {
+function ensureNpmDeps(
+  skillDir: string,
+  api: any,
+  mode: "sandbox" | "host" = "sandbox",
+) {
   const pkgPath = join(skillDir, "package.json");
   if (!existsSync(pkgPath)) {
     const fallbackPkg = {
@@ -261,7 +341,7 @@ function ensureNpmDeps(skillDir: string, api: any) {
         "@x402/fetch": "^2.3.0",
         "@x402/evm": "^2.3.1",
         viem: "^2.46.0",
-        "@polymarket/clob-client": "^6.0.0",
+        "@polymarket/clob-client": "latest",
         ethers: "^5.8.0",
         "@solana/web3.js": "^1.98.4",
         bs58: "^6.0.0",
@@ -272,16 +352,67 @@ function ensureNpmDeps(skillDir: string, api: any) {
       "[moltbank] package.json not found — created fallback package.json for skill runtime deps",
     );
   }
+  try {
+    const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
+    pkg.dependencies = pkg.dependencies ?? {};
+    const cur = String(
+      pkg.dependencies["@polymarket/clob-client"] ?? "",
+    ).trim();
+    if (!cur || cur === "^6.0.0") {
+      pkg.dependencies["@polymarket/clob-client"] = "latest";
+      writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + "\n", "utf8");
+      api.logger.info(
+        "[moltbank] normalized package.json: @polymarket/clob-client -> latest",
+      );
+    }
+  } catch (e) {
+    api.logger.warn(
+      "[moltbank] could not normalize package.json deps: " + String(e),
+    );
+  }
   api.logger.info("[moltbank] installing npm deps...");
-  const result = run("npm install --ignore-scripts", { cwd: skillDir });
-  if (result.ok) {
-    api.logger.info("[moltbank] ✓ npm deps installed");
+  if (mode === "sandbox") {
+    const result = run("npm install --ignore-scripts", { cwd: skillDir });
+    if (result.ok) {
+      api.logger.info("[moltbank] ✓ npm deps installed");
+    } else {
+      api.logger.warn("[moltbank] ✗ npm install failed: " + result.stderr);
+    }
+    return;
+  }
+
+  const hasLock =
+    existsSync(join(skillDir, "package-lock.json")) ||
+    existsSync(join(skillDir, "npm-shrinkwrap.json"));
+  if (hasLock) {
+    const ci = run("npm ci", { cwd: skillDir });
+    if (ci.ok) {
+      api.logger.info("[moltbank] ✓ npm deps installed with npm ci");
+      return;
+    }
+    api.logger.warn(
+      "[moltbank] npm ci failed; trying npm install: " + ci.stderr,
+    );
+  }
+  const install = run("npm install", { cwd: skillDir });
+  if (install.ok) {
+    api.logger.info("[moltbank] ✓ npm deps installed with npm install");
+    return;
+  }
+  api.logger.warn(
+    "[moltbank] npm install failed; trying safe fallback --ignore-scripts",
+  );
+  const fallback = run("npm install --ignore-scripts", { cwd: skillDir });
+  if (fallback.ok) {
+    api.logger.warn(
+      "[moltbank] npm deps installed with fallback --ignore-scripts (some packages may require postinstall)",
+    );
   } else {
-    api.logger.warn("[moltbank] ✗ npm install failed: " + result.stderr);
+    api.logger.warn(
+      "[moltbank] ✗ npm dependency install failed: " + fallback.stderr,
+    );
   }
 }
-
-// ─── mcporter config + registro ──────────────────────────────────────────────
 
 function isMoltBankRegistered(): boolean {
   const result = run("mcporter config list", { silent: true });
@@ -330,7 +461,11 @@ function parseFirstJsonObject(output: string): any | null {
   return null;
 }
 
-function ensureSandboxAuth(skillDir: string, appBaseUrl: string, api: any): boolean {
+function ensureSandboxAuth(
+  skillDir: string,
+  appBaseUrl: string,
+  api: any,
+): boolean {
   const existing = parseActiveTokenFromCredentials();
   if (existing.ok) {
     api.logger.info(
@@ -340,7 +475,9 @@ function ensureSandboxAuth(skillDir: string, appBaseUrl: string, api: any): bool
   }
 
   const credsPath = getCredentialsPath();
-  api.logger.info("[moltbank] no valid credentials found — starting onboarding flow...");
+  api.logger.info(
+    "[moltbank] no valid credentials found — starting onboarding flow...",
+  );
 
   const requestCode = run(
     `APP_BASE_URL="${appBaseUrl}" MOLTBANK_CREDENTIALS_PATH="${credsPath}" node "./scripts/request-oauth-device-code.mjs"`,
@@ -348,21 +485,28 @@ function ensureSandboxAuth(skillDir: string, appBaseUrl: string, api: any): bool
   );
 
   if (!requestCode.ok) {
-    api.logger.warn("[moltbank] ✗ could not request OAuth device code: " + requestCode.stderr);
+    api.logger.warn(
+      "[moltbank] ✗ could not request OAuth device code: " + requestCode.stderr,
+    );
     return false;
   }
 
   const codeJson = parseFirstJsonObject(requestCode.stdout);
   const deviceCode = codeJson?.device_code;
   const userCode = codeJson?.user_code;
-  const verificationUri = codeJson?.verification_uri || `${appBaseUrl}/activate`;
+  const verificationUri =
+    codeJson?.verification_uri || `${appBaseUrl}/activate`;
 
   if (!deviceCode || !userCode) {
-    api.logger.warn("[moltbank] ✗ onboarding response missing device_code/user_code");
+    api.logger.warn(
+      "[moltbank] ✗ onboarding response missing device_code/user_code",
+    );
     return false;
   }
 
-  api.logger.info("[moltbank] ACTION REQUIRED: link this agent to your MoltBank account");
+  api.logger.info(
+    "[moltbank] ACTION REQUIRED: link this agent to your MoltBank account",
+  );
   api.logger.info(`[moltbank] 1) Open: ${verificationUri}`);
   api.logger.info(`[moltbank] 2) Enter code: ${userCode}`);
   api.logger.info("[moltbank] waiting for approval and polling token...");
@@ -378,11 +522,15 @@ function ensureSandboxAuth(skillDir: string, appBaseUrl: string, api: any): bool
 
   const after = parseActiveTokenFromCredentials();
   if (!after.ok) {
-    api.logger.warn("[moltbank] ✗ onboarding finished but credentials are not usable");
+    api.logger.warn(
+      "[moltbank] ✗ onboarding finished but credentials are not usable",
+    );
     return false;
   }
 
-  api.logger.info(`[moltbank] ✓ onboarding completed (active org: ${after.activeOrg})`);
+  api.logger.info(
+    `[moltbank] ✓ onboarding completed (active org: ${after.activeOrg})`,
+  );
   return true;
 }
 
@@ -417,7 +565,9 @@ function ensureMcporterConfig(skillDir: string, appBaseUrl: string, api: any) {
     return;
   }
 
-  api.logger.info("[moltbank] registering MoltBank in mcporter (scope: home)...");
+  api.logger.info(
+    "[moltbank] registering MoltBank in mcporter (scope: home)...",
+  );
 
   const addCmd =
     `mcporter config add MoltBank ` +
@@ -435,7 +585,9 @@ function ensureMcporterConfig(skillDir: string, appBaseUrl: string, api: any) {
     const list = run("mcporter config list", { silent: true });
     api.logger.info("[moltbank] mcporter config list: " + list.stdout);
   } else {
-    api.logger.warn("[moltbank] ✗ mcporter config add failed: " + result.stderr);
+    api.logger.warn(
+      "[moltbank] ✗ mcporter config add failed: " + result.stderr,
+    );
   }
 }
 
@@ -445,7 +597,9 @@ function injectSandboxEnv(skillDir: string, api: any): boolean {
   const credsPath = getCredentialsPath();
 
   if (!existsSync(credsPath)) {
-    api.logger.info("[moltbank] no credentials.json found — skipping sandbox env injection");
+    api.logger.info(
+      "[moltbank] no credentials.json found — skipping sandbox env injection",
+    );
     return false;
   }
 
@@ -456,13 +610,17 @@ function injectSandboxEnv(skillDir: string, api: any): boolean {
     const activeOrg = creds.active_organization;
 
     if (!activeOrg) {
-      api.logger.warn("[moltbank] ✗ active_organization not set in credentials.json");
+      api.logger.warn(
+        "[moltbank] ✗ active_organization not set in credentials.json",
+      );
       return false;
     }
 
     const org = creds.organizations?.find((o: any) => o.name === activeOrg);
     if (!org?.access_token) {
-      api.logger.warn(`[moltbank] ✗ no access_token for active org "${activeOrg}"`);
+      api.logger.warn(
+        `[moltbank] ✗ no access_token for active org "${activeOrg}"`,
+      );
       return false;
     }
 
@@ -476,36 +634,52 @@ function injectSandboxEnv(skillDir: string, api: any): boolean {
       api.logger.info(`[moltbank] ✓ MOLTBANK injected (org: ${activeOrg})`);
       changed = true;
     } else {
-      api.logger.info(`[moltbank] ✓ MOLTBANK already injected (org: ${activeOrg})`);
+      api.logger.info(
+        `[moltbank] ✓ MOLTBANK already injected (org: ${activeOrg})`,
+      );
     }
 
     if (envObj.ACTIVE_ORG_OVERRIDE !== activeOrg) {
       envObj.ACTIVE_ORG_OVERRIDE = activeOrg;
-      api.logger.info(`[moltbank] ✓ ACTIVE_ORG_OVERRIDE injected ("${activeOrg}")`);
+      api.logger.info(
+        `[moltbank] ✓ ACTIVE_ORG_OVERRIDE injected ("${activeOrg}")`,
+      );
       changed = true;
     } else {
-      api.logger.info(`[moltbank] ✓ ACTIVE_ORG_OVERRIDE already set ("${activeOrg}")`);
+      api.logger.info(
+        `[moltbank] ✓ ACTIVE_ORG_OVERRIDE already set ("${activeOrg}")`,
+      );
     }
 
     let privateKey = org.x402_signer_private_key ?? "";
 
     if (!privateKey) {
-      api.logger.info("[moltbank] x402_signer_private_key not found — generating EOA signer...");
+      api.logger.info(
+        "[moltbank] x402_signer_private_key not found — generating EOA signer...",
+      );
       const initResult = run(
         `MOLTBANK_CREDENTIALS_PATH="${credsPath}" node "./scripts/init-openclaw-signer.mjs"`,
         { cwd: skillDir, silent: true },
       );
       if (!initResult.ok) {
-        api.logger.warn("[moltbank] ✗ could not generate EOA signer: " + initResult.stderr);
-        api.logger.warn("[moltbank]   agent will generate signer on first x402/Polymarket use");
+        api.logger.warn(
+          "[moltbank] ✗ could not generate EOA signer: " + initResult.stderr,
+        );
+        api.logger.warn(
+          "[moltbank]   agent will generate signer on first x402/Polymarket use",
+        );
       } else {
         const freshCreds = JSON.parse(readFileSync(credsPath, "utf8"));
-        const freshOrg = freshCreds.organizations?.find((o: any) => o.name === activeOrg);
+        const freshOrg = freshCreds.organizations?.find(
+          (o: any) => o.name === activeOrg,
+        );
         privateKey = freshOrg?.x402_signer_private_key ?? "";
         if (privateKey) {
           api.logger.info("[moltbank] ✓ EOA signer generated and saved");
         } else {
-          api.logger.warn("[moltbank] ✗ init-openclaw-signer.mjs ran but key not found");
+          api.logger.warn(
+            "[moltbank] ✗ init-openclaw-signer.mjs ran but key not found",
+          );
         }
       }
     }
@@ -519,12 +693,16 @@ function injectSandboxEnv(skillDir: string, api: any): boolean {
         api.logger.info("[moltbank] ✓ SIGNER already injected");
       }
     } else {
-      api.logger.info("[moltbank] ℹ SIGNER not available — skipped (agent will handle on first use)");
+      api.logger.info(
+        "[moltbank] ℹ SIGNER not available — skipped (agent will handle on first use)",
+      );
     }
 
     if (changed) {
       writeOpenclawConfig(config);
-      api.logger.info("[moltbank] ✓ openclaw.json updated with sandbox env vars");
+      api.logger.info(
+        "[moltbank] ✓ openclaw.json updated with sandbox env vars",
+      );
     }
 
     return changed;
@@ -572,33 +750,71 @@ function configureSandbox(api: any): boolean {
     let changed = false;
     const config = readOpenclawConfig();
 
-    const currentCmd = getNestedValue(config, ["agents", "defaults", "sandbox", "docker", "setupCommand"]) ?? "";
+    const currentCmd =
+      getNestedValue(config, [
+        "agents",
+        "defaults",
+        "sandbox",
+        "docker",
+        "setupCommand",
+      ]) ?? "";
     const hasMcporterSetup = currentCmd.includes("mcporter");
     const hasNode22Setup = currentCmd.includes("node_22.x");
     const hasNode22Fix = currentCmd.includes("update-alternatives");
-    const isCorrupted = currentCmd.includes("/home/") || currentCmd.includes("Unknown command");
+    const isCorrupted =
+      currentCmd.includes("/home/") || currentCmd.includes("Unknown command");
 
     if (!hasMcporterSetup || !hasNode22Setup || !hasNode22Fix || isCorrupted) {
-      setNestedValue(config, ["agents", "defaults", "sandbox", "docker", "setupCommand"], SETUP_CMD);
-      api.logger.info("[moltbank] ✓ sandbox setupCommand written directly to JSON (no shell expansion)");
+      setNestedValue(
+        config,
+        ["agents", "defaults", "sandbox", "docker", "setupCommand"],
+        SETUP_CMD,
+      );
+      api.logger.info(
+        "[moltbank] ✓ sandbox setupCommand written directly to JSON (no shell expansion)",
+      );
       changed = true;
     } else {
       api.logger.info("[moltbank] ✓ sandbox setupCommand already correct");
     }
 
-    const currentNetwork = getNestedValue(config, ["agents", "defaults", "sandbox", "docker", "network"]);
+    const currentNetwork = getNestedValue(config, [
+      "agents",
+      "defaults",
+      "sandbox",
+      "docker",
+      "network",
+    ]);
     if (currentNetwork !== "bridge") {
-      setNestedValue(config, ["agents", "defaults", "sandbox", "docker", "network"], "bridge");
+      setNestedValue(
+        config,
+        ["agents", "defaults", "sandbox", "docker", "network"],
+        "bridge",
+      );
       api.logger.info("[moltbank] ✓ sandbox network set to bridge");
       changed = true;
     }
 
-    setNestedValue(config, ["agents", "defaults", "sandbox", "docker", "readOnlyRoot"], false);
-    setNestedValue(config, ["agents", "defaults", "sandbox", "docker", "user"], "0:0");
-    setNestedValue(config, ["agents", "defaults", "sandbox", "workspaceAccess"], "rw");
+    setNestedValue(
+      config,
+      ["agents", "defaults", "sandbox", "docker", "readOnlyRoot"],
+      false,
+    );
+    setNestedValue(
+      config,
+      ["agents", "defaults", "sandbox", "docker", "user"],
+      "0:0",
+    );
+    setNestedValue(
+      config,
+      ["agents", "defaults", "sandbox", "workspaceAccess"],
+      "rw",
+    );
 
     writeOpenclawConfig(config);
-    api.logger.info("[moltbank] ✓ sandbox docker configured (written directly to openclaw.json)");
+    api.logger.info(
+      "[moltbank] ✓ sandbox docker configured (written directly to openclaw.json)",
+    );
     return changed;
   } catch (e) {
     api.logger.warn("[moltbank] ✗ sandbox configuration failed: " + String(e));
@@ -606,14 +822,13 @@ function configureSandbox(api: any): boolean {
   }
 }
 
-// ─── sandbox image ────────────────────────────────────────────────────────────
-
-
 // ─── sandbox recreate + gateway restart ──────────────────────────────────────
 
 function recreateSandboxAndRestart(api: any) {
   api.logger.info("[moltbank] recreating sandbox containers...");
-  api.logger.info("[moltbank] ⏳ waiting 8s before recreate (hot container protection)...");
+  api.logger.info(
+    "[moltbank] ⏳ waiting 8s before recreate (hot container protection)...",
+  );
   setTimeout(() => {
     api.logger.info("[moltbank] stopping gateway...");
     run("openclaw gateway stop", { silent: true });
@@ -623,7 +838,9 @@ function recreateSandboxAndRestart(api: any) {
       { silent: true },
     );
     if (stillRunning.stdout.trim()) {
-      api.logger.info(`[moltbank] gateway still running (pids: ${stillRunning.stdout.trim()}) — sending SIGKILL...`);
+      api.logger.info(
+        `[moltbank] gateway still running (pids: ${stillRunning.stdout.trim()}) — sending SIGKILL...`,
+      );
       run(
         "kill -9 $(ps aux | grep openclaw-gateway | grep -v grep | awk '{print $2}') 2>/dev/null || true",
         { silent: true },
@@ -635,12 +852,18 @@ function recreateSandboxAndRestart(api: any) {
 
     run("sleep 2", { silent: true });
 
-    const recreate = run("openclaw sandbox recreate --all --force", { silent: false });
+    const recreate = run("openclaw sandbox recreate --all --force", {
+      silent: false,
+    });
     if (recreate.ok) {
-      api.logger.info("[moltbank] ✓ sandbox containers recreated — new container will be created on next agent message");
+      api.logger.info(
+        "[moltbank] ✓ sandbox containers recreated — new container will be created on next agent message",
+      );
     } else {
       api.logger.warn("[moltbank] ✗ sandbox recreate failed");
-      api.logger.warn("[moltbank]   run manually: openclaw sandbox recreate --all --force");
+      api.logger.warn(
+        "[moltbank]   run manually: openclaw sandbox recreate --all --force",
+      );
     }
 
     api.logger.info("[moltbank] restarting gateway...");
@@ -648,10 +871,10 @@ function recreateSandboxAndRestart(api: any) {
   }, 8000);
 }
 
-
 // ─── main setup ───────────────────────────────────────────────────────────────
 
 async function runSetup(cfg: any, api: any) {
+  let hostReady = false;
   const appBaseUrl = getAppBaseUrl(cfg);
   const skillName = getSkillName(cfg);
   const sandbox = isSandboxEnabled();
@@ -659,7 +882,9 @@ async function runSetup(cfg: any, api: any) {
 
   api.logger.info(`[moltbank] ══════════════════════════════════════`);
   api.logger.info(`[moltbank] MoltBank plugin setup starting`);
-  api.logger.info(`[moltbank] mode:      ${sandbox ? "sandbox (Docker)" : "host (direct)"}`);
+  api.logger.info(
+    `[moltbank] mode:      ${sandbox ? "sandbox (Docker)" : "host (direct)"}`,
+  );
   api.logger.info(`[moltbank] skill dir: ${skillDir}`);
   api.logger.info(`[moltbank] base url:  ${appBaseUrl}`);
   api.logger.info(`[moltbank] ══════════════════════════════════════`);
@@ -667,87 +892,208 @@ async function runSetup(cfg: any, api: any) {
   if (sandbox) {
     api.logger.info("[moltbank] configuring sandbox mode...");
 
-    // FIX: mcporter se necesita en el host para sandbox mode también
     api.logger.info("[moltbank] [sandbox 0/10] ensuring mcporter on host...");
     ensureMcporter(api);
 
     api.logger.info("[moltbank] [sandbox 1/10] installing skill files...");
-    const skillInstalled = ensureSkillInstalled(skillDir, appBaseUrl, skillName, api);
+    const skillInstalled = ensureSkillInstalled(
+      skillDir,
+      appBaseUrl,
+      skillName,
+      api,
+      "sandbox",
+    );
     if (!skillInstalled) {
-      api.logger.warn("[moltbank] skill install failed — aborting sandbox setup");
+      api.logger.warn(
+        "[moltbank] skill install failed — aborting sandbox setup",
+      );
       return;
     }
 
     api.logger.info("[moltbank] [sandbox 2/10] ensuring SKILL.md naming...");
     ensureSkillFilesUppercase(skillDir, api);
 
-    api.logger.info("[moltbank] [sandbox 3/10] installing skill npm dependencies...");
-    ensureNpmDeps(skillDir, api);
+    api.logger.info(
+      "[moltbank] [sandbox 3/10] installing skill npm dependencies...",
+    );
+    ensureNpmDeps(skillDir, api, "sandbox");
 
-    api.logger.info("[moltbank] [sandbox 4/10] normalizing SKILL.md frontmatter...");
+    api.logger.info(
+      "[moltbank] [sandbox 4/10] normalizing SKILL.md frontmatter...",
+    );
     fixSkillFrontmatter(skillDir, skillName, api);
 
-    api.logger.info("[moltbank] [sandbox 5/10] applying permissions (chown + chmod)...");
+    api.logger.info(
+      "[moltbank] [sandbox 5/10] applying permissions (chown + chmod)...",
+    );
     ensureSkillPermissions(skillDir, api);
 
-    api.logger.info("[moltbank] [sandbox 6/10] writing/registering mcporter config...");
+    api.logger.info(
+      "[moltbank] [sandbox 6/10] writing/registering mcporter config...",
+    );
     ensureMcporterConfig(skillDir, appBaseUrl, api);
 
-    api.logger.info("[moltbank] [sandbox 7/10] ensuring sandbox authentication...");
+    api.logger.info(
+      "[moltbank] [sandbox 7/10] ensuring sandbox authentication...",
+    );
     if (!ensureSandboxAuth(skillDir, appBaseUrl, api)) {
-      api.logger.warn("[moltbank] sandbox auth not ready — complete onboarding and run setup again");
+      api.logger.warn(
+        "[moltbank] sandbox auth not ready — complete onboarding and run setup again",
+      );
       return;
     }
 
-    api.logger.info("[moltbank] [sandbox 8/10] configuring sandbox docker settings...");
+    api.logger.info(
+      "[moltbank] [sandbox 8/10] configuring sandbox docker settings...",
+    );
     const sandboxChanged = configureSandbox(api);
 
-    api.logger.info("[moltbank] [sandbox 9/10] injecting sandbox env vars (MOLTBANK, ACTIVE_ORG_OVERRIDE, SIGNER)...");
+    api.logger.info(
+      "[moltbank] [sandbox 9/10] injecting sandbox env vars (MOLTBANK, ACTIVE_ORG_OVERRIDE, SIGNER)...",
+    );
     const envChanged = injectSandboxEnv(skillDir, api);
 
-    api.logger.info("[moltbank] [sandbox 10/10] apply sandbox changes (recreate + gateway stop)...");
+    api.logger.info(
+      "[moltbank] [sandbox 10/10] apply sandbox changes (recreate + gateway stop)...",
+    );
     if (sandboxChanged || envChanged) {
-      api.logger.info("[moltbank] config changed — recreating sandbox to apply new settings");
+      api.logger.info(
+        "[moltbank] config changed — recreating sandbox to apply new settings",
+      );
       recreateSandboxAndRestart(api);
     } else {
       api.logger.info("[moltbank] sandbox unchanged — no restart needed");
     }
   } else {
-    api.logger.info("[moltbank] [host 1/1] ensuring mcporter on host...");
+    api.logger.info("[moltbank] [host 1/5] ensuring mcporter on host...");
     ensureMcporter(api);
-    api.logger.info("[moltbank] host mode — moltbank.sh uses ~/.MoltBank/credentials.json directly");
+
+    api.logger.info("[moltbank] [host 2/5] installing skill files...");
+    const installed = ensureSkillInstalled(
+      skillDir,
+      appBaseUrl,
+      skillName,
+      api,
+      "host",
+    );
+    if (!installed) {
+      api.logger.warn(
+        "[moltbank] host setup aborted: skill install failed. Verify install.sh/base URL and retry.",
+      );
+      return;
+    }
+
+    api.logger.info(
+      "[moltbank] [host 3/5] ensuring SKILL.md naming/frontmatter...",
+    );
+    ensureSkillFilesUppercase(skillDir, api);
+    fixSkillFrontmatter(skillDir, skillName, api);
+
+    api.logger.info(
+      "[moltbank] [host 4/5] installing skill npm dependencies...",
+    );
+    ensureNpmDeps(skillDir, api, "host");
+
+    api.logger.info(
+      "[moltbank] [host 5/5] writing/registering mcporter config...",
+    );
+    ensureMcporterConfig(skillDir, appBaseUrl, api);
+
+    // FIX: usar path absoluto para el .ps1 en Windows
+    const ps1Path = join(skillDir, "scripts", "moltbank.ps1");
+    const smokeCmd = IS_WIN
+      ? `powershell -NoProfile -ExecutionPolicy Bypass -File "${ps1Path}" list MoltBank`
+      : `"${skillDir}/scripts/moltbank.sh" list MoltBank`;
+    const smoke = run(smokeCmd, { cwd: skillDir, silent: true });
+    if (!smoke.ok) {
+      api.logger.warn(
+        "[moltbank] host setup incomplete: smoke test failed (`moltbank list MoltBank` via platform script)",
+      );
+    } else {
+      api.logger.info(
+        "[moltbank] host smoke test passed (`moltbank list MoltBank`)",
+      );
+    }
+    hostReady = smoke.ok;
+    api.logger.info(
+      "[moltbank] host mode — setup completed (no auth step in host path)",
+    );
   }
 
   api.logger.info(`[moltbank] ══════════════════════════════════════`);
   api.logger.info(`[moltbank] ✓ setup complete`);
+  if (sandbox) {
+    api.logger.info(
+      "[moltbank] ⏳ sandbox will be recreated in ~8s — send a message to the agent after that",
+    );
+  } else if (hostReady) {
+    api.logger.info("[moltbank] ✓ host ready");
+  }
   api.logger.info(`[moltbank]   skill:    ${skillDir}/SKILL.md`);
   api.logger.info(`[moltbank]   mcporter: ${skillDir}/config/mcporter.json`);
   if (sandbox) {
     const finalConfig = readOpenclawConfig();
-    const finalEnv = getNestedValue(finalConfig, ["agents", "defaults", "sandbox", "docker", "env"]) ?? {};
-    const finalNetwork = getNestedValue(finalConfig, ["agents", "defaults", "sandbox", "docker", "network"]);
-    const finalCmd = getNestedValue(finalConfig, ["agents", "defaults", "sandbox", "docker", "setupCommand"]) ?? "";
+    const finalEnv =
+      getNestedValue(finalConfig, [
+        "agents",
+        "defaults",
+        "sandbox",
+        "docker",
+        "env",
+      ]) ?? {};
+    const finalNetwork = getNestedValue(finalConfig, [
+      "agents",
+      "defaults",
+      "sandbox",
+      "docker",
+      "network",
+    ]);
+    const finalCmd =
+      getNestedValue(finalConfig, [
+        "agents",
+        "defaults",
+        "sandbox",
+        "docker",
+        "setupCommand",
+      ]) ?? "";
 
     api.logger.info(`[moltbank]   openclaw.json sandbox env:`);
-    api.logger.info(`[moltbank]     MOLTBANK:             ${finalEnv.MOLTBANK ? "✓ set" : "✗ missing"}`);
-    api.logger.info(`[moltbank]     ACTIVE_ORG_OVERRIDE:  ${finalEnv.ACTIVE_ORG_OVERRIDE ? `✓ "${finalEnv.ACTIVE_ORG_OVERRIDE}"` : "✗ missing"}`);
-    api.logger.info(`[moltbank]     SIGNER:               ${finalEnv.SIGNER ? "✓ set" : "✗ missing (agent may generate on first use)"}`);
+    api.logger.info(
+      `[moltbank]     MOLTBANK:             ${finalEnv.MOLTBANK ? "✓ set" : "✗ missing"}`,
+    );
+    api.logger.info(
+      `[moltbank]     ACTIVE_ORG_OVERRIDE:  ${finalEnv.ACTIVE_ORG_OVERRIDE ? `✓ "${finalEnv.ACTIVE_ORG_OVERRIDE}"` : "✗ missing"}`,
+    );
+    api.logger.info(
+      `[moltbank]     SIGNER:               ${finalEnv.SIGNER ? "✓ set" : "✗ missing (agent may generate on first use)"}`,
+    );
     api.logger.info(`[moltbank]   sandbox docker:`);
-    api.logger.info(`[moltbank]     network:              ${finalNetwork === "bridge" ? "✓ bridge" : `✗ "${finalNetwork}" (expected bridge)`}`);
-    api.logger.info(`[moltbank]     setupCommand:         ${finalCmd.includes("node_22.x") && !finalCmd.includes("/home/") ? "✓ ok (no host paths)" : "✗ may be corrupted"}`);
+    api.logger.info(
+      `[moltbank]     network:              ${finalNetwork === "bridge" ? "✓ bridge" : `✗ "${finalNetwork}" (expected bridge)`}`,
+    );
+    api.logger.info(
+      `[moltbank]     setupCommand:         ${finalCmd.includes("node_22.x") && !finalCmd.includes("/home/") ? "✓ ok (no host paths)" : "✗ may be corrupted"}`,
+    );
 
-    // Verificar red del contenedor activo
     const containerCheck = run(
       `docker inspect $(docker ps | grep openclaw-sbx | awk '{print $1}') --format '{{.HostConfig.NetworkMode}}' 2>/dev/null`,
       { silent: true },
     );
     if (!containerCheck.ok || !containerCheck.stdout) {
-      api.logger.info(`[moltbank]   container: not running yet — will be created on first agent message`);
+      api.logger.info(
+        `[moltbank]   container: not running yet — will be created on first agent message`,
+      );
     } else if (containerCheck.stdout.trim() === "bridge") {
-      api.logger.info(`[moltbank]   container: ✓ bridge network — internet available`);
+      api.logger.info(
+        `[moltbank]   container: ✓ bridge network — internet available`,
+      );
     } else {
-      api.logger.warn(`[moltbank]   container: ✗ network "${containerCheck.stdout.trim()}" — NO INTERNET`);
-      api.logger.warn(`[moltbank]   agent cannot reach MoltBank — stop gateway, reinstall plugin, run openclaw gateway`);
+      api.logger.warn(
+        `[moltbank]   container: ✗ network "${containerCheck.stdout.trim()}" — NO INTERNET`,
+      );
+      api.logger.warn(
+        `[moltbank]   agent cannot reach MoltBank — stop gateway, reinstall plugin, run openclaw gateway`,
+      );
     }
   }
   api.logger.info(`[moltbank] ══════════════════════════════════════`);
@@ -791,7 +1137,9 @@ export default function register(api: any) {
               if (changed) {
                 recreateSandboxAndRestart({ logger: console });
               } else {
-                console.log("[moltbank] No sandbox docker changes — not scheduling teardown");
+                console.log(
+                  "[moltbank] No sandbox docker changes — not scheduling teardown",
+                );
               }
             }),
         )
@@ -805,7 +1153,9 @@ export default function register(api: any) {
               if (changed) {
                 recreateSandboxAndRestart({ logger: console });
               } else {
-                console.log("[moltbank] No env changes — not scheduling teardown");
+                console.log(
+                  "[moltbank] No env changes — not scheduling teardown",
+                );
               }
             }),
         )
