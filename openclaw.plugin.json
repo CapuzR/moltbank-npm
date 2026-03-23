@@ -19,7 +19,7 @@
     "uiHints": {
         "appBaseUrl": {
             "label": "App Base URL",
-            "placeholder": "https://your-deployment.trycloudflare.com"
+            "placeholder": "https://app.moltbank.bot"
         },
         "skillName": {
             "label": "Skill Name",
