@@ -1,0 +1,29 @@
+{
+    "id": "moltbank",
+    "name": "MoltBank",
+    "description": "MoltBank banking skill for OpenClaw — installs mcporter, npm dependencies, sandbox setup, and the MoltBank skill",
+    "configSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "appBaseUrl": {
+                "type": "string",
+                "description": "MoltBank deployment URL"
+            },
+            "skillName": {
+                "type": "string",
+                "description": "Override skill folder name (default: MoltBank)"
+            }
+        }
+    },
+    "uiHints": {
+        "appBaseUrl": {
+            "label": "App Base URL",
+            "placeholder": "https://your-deployment.trycloudflare.com"
+        },
+        "skillName": {
+            "label": "Skill Name",
+            "placeholder": "MoltBank"
+        }
+    }
+}
