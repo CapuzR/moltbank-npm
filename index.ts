@@ -364,12 +364,29 @@ function fixSkillFrontmatter(skillDir: string, skillName: string, api: LoggerApi
     return;
   }
 
-  const bins = IS_WIN ? '["mcporter"]' : '["mcporter", "jq"]';
+  const binsYaml = IS_WIN ? '        - mcporter' : '        - mcporter\n        - jq';
   const newFrontmatter = `---
 name: ${skillName}
-version: 1.5.2
+version: 1.5.3
 description: MCP skill for MoltBank business banking workflows (treasury, approvals, allowances, x402, OpenRouter, Polymarket, and Pump.Fun).
-metadata: {"openclaw": {"requires": {"bins": ${bins}}, "primaryEnv": "MOLTBANK"}}
+homepage: \${APP_BASE_URL:-https://app.moltbank.bot}
+metadata:
+  category: finance
+  api_base: \${APP_BASE_URL:-https://app.moltbank.bot}/api/mcp
+  install_script: \${APP_BASE_URL:-https://app.moltbank.bot}/install.sh
+  openclaw:
+    requires:
+      bins:
+${binsYaml}
+      npm:
+        - '@x402/fetch@^2.3.0'
+        - '@x402/evm@^2.3.1'
+        - 'viem@^2.46.0'
+        - '@polymarket/clob-client'
+        - 'ethers@5'
+        - '@solana/web3.js@^1.98.4'
+        - 'bs58@^6.0.0'
+    primaryEnv: MOLTBANK
 ---`;
 
   const body = content.slice(frontmatterMatch[0].length);
