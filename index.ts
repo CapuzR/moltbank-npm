@@ -10,6 +10,104 @@ import { join, dirname } from "path";
 import { homedir } from "os";
 const IS_WIN = process.platform === "win32";
 
+type OpenclawConfig = Record<string, unknown>;
+type ParsedJsonObject = Record<string, unknown>;
+
+interface MoltbankPluginConfig {
+  skillName?: string;
+  appBaseUrl?: string;
+}
+
+interface CredentialsOrganization {
+  name?: string;
+  access_token?: string;
+  x402_signer_private_key?: string;
+}
+
+interface CredentialsFile {
+  active_organization?: string;
+  organizations?: CredentialsOrganization[];
+}
+
+interface LoggerLike {
+  info(message: string): void;
+  warn(message: string): void;
+}
+
+interface LoggerApi {
+  logger: LoggerLike;
+}
+
+interface ServiceDefinition {
+  id: string;
+  start: () => void | Promise<void>;
+  stop: () => void | Promise<void>;
+}
+
+interface CliCommandLike {
+  command(name: string): CliCommandLike;
+  createCommand(name: string): CliCommandLike;
+  description(text: string): CliCommandLike;
+  addCommand(command: CliCommandLike): CliCommandLike;
+  action(handler: () => void | Promise<void>): CliCommandLike;
+}
+
+interface PluginApiConfig {
+  plugins?: {
+    entries?: {
+      moltbank?: {
+        config?: MoltbankPluginConfig;
+      };
+    };
+  };
+}
+
+interface PluginApi extends LoggerApi {
+  config?: PluginApiConfig;
+  registerService(service: ServiceDefinition): void;
+  registerCli(
+    handler: (args: { program: CliCommandLike }) => void,
+    options: { commands: string[] },
+  ): void;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function asString(value: unknown, fallback = ""): string {
+  return typeof value === "string" ? value : fallback;
+}
+
+function asStringRecord(value: unknown): Record<string, string> {
+  if (!isRecord(value)) return {};
+
+  const out: Record<string, string> = {};
+  for (const [key, v] of Object.entries(value)) {
+    if (typeof v === "string") {
+      out[key] = v;
+    }
+  }
+  return out;
+}
+
+function getExecErrorMessage(error: unknown): string {
+  if (isRecord(error) && "stderr" in error) {
+    const stderr = (error as { stderr?: unknown }).stderr;
+    if (typeof stderr === "string") {
+      return stderr.trim();
+    }
+    if (
+      isRecord(stderr) &&
+      "toString" in stderr &&
+      typeof (stderr as { toString?: unknown }).toString === "function"
+    ) {
+      return (stderr as { toString: () => string }).toString().trim();
+    }
+  }
+  return String(error);
+}
+
 function run(cmd: string, opts: { cwd?: string; silent?: boolean } = {}) {
   try {
     const out = execSync(cmd, {
@@ -19,11 +117,11 @@ function run(cmd: string, opts: { cwd?: string; silent?: boolean } = {}) {
       shell: IS_WIN ? (process.env.ComSpec ?? "cmd.exe") : "/bin/bash",
     });
     return { ok: true, stdout: out?.toString().trim() ?? "" };
-  } catch (e: any) {
+  } catch (e: unknown) {
     return {
       ok: false,
       stdout: "",
-      stderr: e.stderr?.toString().trim() ?? String(e),
+      stderr: getExecErrorMessage(e),
     };
   }
 }
@@ -38,11 +136,11 @@ function getWorkspace(): string {
   );
 }
 
-function getSkillName(cfg: any): string {
+function getSkillName(cfg: MoltbankPluginConfig): string {
   return cfg?.skillName || process.env.MOLTBANK_SKILL_NAME || "MoltBank";
 }
 
-function getAppBaseUrl(cfg: any): string {
+function getAppBaseUrl(cfg: MoltbankPluginConfig): string {
   return (
     cfg?.appBaseUrl ||
     process.env.APP_BASE_URL ||
@@ -61,7 +159,7 @@ function isSandboxEnabled(): boolean {
   }
 }
 
-function getSkillDir(cfg: any): string {
+function getSkillDir(cfg: MoltbankPluginConfig): string {
   const skillName = getSkillName(cfg);
   return join(getWorkspace(), "skills", skillName);
 }
@@ -73,42 +171,54 @@ function getCredentialsPath(): string {
   );
 }
 
-function readOpenclawConfig(): any {
+function readOpenclawConfig(): OpenclawConfig {
   const configPath = join(homedir(), ".openclaw", "openclaw.json");
   try {
-    return JSON.parse(readFileSync(configPath, "utf8"));
+    const parsed = JSON.parse(readFileSync(configPath, "utf8")) as unknown;
+    return isRecord(parsed) ? parsed : {};
   } catch {
     return {};
   }
 }
 
-function writeOpenclawConfig(config: any): void {
+function writeOpenclawConfig(config: OpenclawConfig): void {
   const configPath = join(homedir(), ".openclaw", "openclaw.json");
   writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", "utf8");
 }
 
-function getNestedValue(obj: any, path: string[]): any {
-  return path.reduce((acc, key) => acc?.[key], obj);
+function getNestedValue(obj: unknown, path: string[]): unknown {
+  let current: unknown = obj;
+  for (const key of path) {
+    if (!isRecord(current)) {
+      return undefined;
+    }
+    current = current[key];
+  }
+  return current;
 }
 
-function setNestedValue(obj: any, path: string[], value: any): void {
-  const last = path[path.length - 1];
-  const parent = path.slice(0, -1).reduce((acc, key) => {
-    if (
-      acc[key] === undefined ||
-      acc[key] === null ||
-      typeof acc[key] !== "object"
-    ) {
-      acc[key] = {};
+function setNestedValue(
+  obj: Record<string, unknown>,
+  path: string[],
+  value: unknown,
+): void {
+  if (path.length === 0) return;
+
+  let current: Record<string, unknown> = obj;
+  for (const key of path.slice(0, -1)) {
+    const next = current[key];
+    if (!isRecord(next)) {
+      current[key] = {};
     }
-    return acc[key];
-  }, obj);
-  parent[last] = value;
+    current = current[key] as Record<string, unknown>;
+  }
+
+  current[path[path.length - 1]] = value;
 }
 
 // ─── mcporter ────────────────────────────────────────────────────────────────
 
-function ensureMcporter(api: any) {
+function ensureMcporter(api: LoggerApi) {
   if (hasBin("mcporter")) {
     const v = run("mcporter --version", { silent: true });
     api.logger.info(
@@ -169,7 +279,7 @@ function ensureSkillInstalled(
   skillDir: string,
   appBaseUrl: string,
   skillName: string,
-  api: any,
+  api: LoggerApi,
   mode: "sandbox" | "host" = "sandbox",
 ) {
   const successFlag = join(skillDir, ".install_success");
@@ -199,7 +309,7 @@ function ensureSkillInstalled(
 }
 // ─── SKILL.md uppercase + frontmatter ────────────────────────────────────────
 
-function ensureSkillFilesUppercase(skillDir: string, api: any) {
+function ensureSkillFilesUppercase(skillDir: string, api: LoggerApi) {
   const lower = join(skillDir, "skill.md");
   const upper = join(skillDir, "SKILL.md");
   if (existsSync(upper)) {
@@ -214,7 +324,7 @@ function ensureSkillFilesUppercase(skillDir: string, api: any) {
   }
 }
 
-function fixSkillFrontmatter(skillDir: string, skillName: string, api: any) {
+function fixSkillFrontmatter(skillDir: string, skillName: string, api: LoggerApi) {
   const skillFile = join(skillDir, "SKILL.md");
   if (!existsSync(skillFile)) {
     api.logger.warn(
@@ -251,7 +361,7 @@ metadata: {"openclaw": {"requires": {"bins": ${bins}}, "primaryEnv": "MOLTBANK"}
   }
 }
 
-function ensureSkillPermissions(skillDir: string, api: any) {
+function ensureSkillPermissions(skillDir: string, api: LoggerApi) {
   if (IS_WIN) {
     api.logger.info("[moltbank] ✓ skipping unix permissions (Windows)");
     return;
@@ -301,7 +411,7 @@ function ensureSkillPermissions(skillDir: string, api: any) {
 
 function ensureNpmDeps(
   skillDir: string,
-  api: any,
+  api: LoggerApi,
   mode: "sandbox" | "host" = "sandbox",
 ) {
   const pkgPath = join(skillDir, "package.json");
@@ -402,10 +512,10 @@ function parseActiveTokenFromCredentials(): {
   const credsPath = getCredentialsPath();
   if (!existsSync(credsPath)) return { ok: false };
   try {
-    const creds = JSON.parse(readFileSync(credsPath, "utf8"));
+    const creds = JSON.parse(readFileSync(credsPath, "utf8")) as CredentialsFile;
     const activeOrg = creds?.active_organization;
     if (!activeOrg) return { ok: false };
-    const org = creds.organizations?.find((o: any) => o.name === activeOrg);
+    const org = creds.organizations?.find((o: CredentialsOrganization) => o.name === activeOrg);
     if (!org?.access_token) return { ok: false };
     return {
       ok: true,
@@ -418,7 +528,7 @@ function parseActiveTokenFromCredentials(): {
   }
 }
 
-function parseFirstJsonObject(output: string): any | null {
+function parseFirstJsonObject(output: string): ParsedJsonObject | null {
   const trimmed = (output || "").trim();
   if (!trimmed) return null;
   try {
@@ -438,7 +548,7 @@ function parseFirstJsonObject(output: string): any | null {
 function ensureSandboxAuth(
   skillDir: string,
   appBaseUrl: string,
-  api: any,
+  api: LoggerApi,
 ): boolean {
   const existing = parseActiveTokenFromCredentials();
   if (existing.ok) {
@@ -508,7 +618,7 @@ function ensureSandboxAuth(
   return true;
 }
 
-function ensureMcporterConfig(skillDir: string, appBaseUrl: string, api: any) {
+function ensureMcporterConfig(skillDir: string, appBaseUrl: string, api: LoggerApi) {
   const cfgPath = join(skillDir, "config", "mcporter.json");
   mkdirSync(join(skillDir, "config"), { recursive: true });
 
@@ -567,7 +677,7 @@ function ensureMcporterConfig(skillDir: string, appBaseUrl: string, api: any) {
 
 // ─── sandbox env vars ────────────────────────────────────────────────────────
 
-function injectSandboxEnv(skillDir: string, api: any): boolean {
+function injectSandboxEnv(skillDir: string, api: LoggerApi): boolean {
   const credsPath = getCredentialsPath();
 
   if (!existsSync(credsPath)) {
@@ -590,7 +700,7 @@ function injectSandboxEnv(skillDir: string, api: any): boolean {
       return false;
     }
 
-    const org = creds.organizations?.find((o: any) => o.name === activeOrg);
+    const org = creds.organizations?.find((o: CredentialsOrganization) => o.name === activeOrg);
     if (!org?.access_token) {
       api.logger.warn(
         `[moltbank] ✗ no access_token for active org "${activeOrg}"`,
@@ -643,9 +753,9 @@ function injectSandboxEnv(skillDir: string, api: any): boolean {
           "[moltbank]   agent will generate signer on first x402/Polymarket use",
         );
       } else {
-        const freshCreds = JSON.parse(readFileSync(credsPath, "utf8"));
+        const freshCreds = JSON.parse(readFileSync(credsPath, "utf8")) as CredentialsFile;
         const freshOrg = freshCreds.organizations?.find(
-          (o: any) => o.name === activeOrg,
+          (o: CredentialsOrganization) => o.name === activeOrg,
         );
         privateKey = freshOrg?.x402_signer_private_key ?? "";
         if (privateKey) {
@@ -688,7 +798,7 @@ function injectSandboxEnv(skillDir: string, api: any): boolean {
 
 // ─── sandbox docker config ────────────────────────────────────────────────────
 
-function configureSandbox(api: any): boolean {
+function configureSandbox(api: LoggerApi): boolean {
   const SETUP_CMD =
     "echo 'APT::Sandbox::User \"root\";' > /etc/apt/apt.conf.d/99sandbox && " +
     "apt-get update -qq && " +
@@ -724,14 +834,15 @@ function configureSandbox(api: any): boolean {
     let changed = false;
     const config = readOpenclawConfig();
 
-    const currentCmd =
+    const currentCmd = asString(
       getNestedValue(config, [
         "agents",
         "defaults",
         "sandbox",
         "docker",
         "setupCommand",
-      ]) ?? "";
+      ]),
+    );
     const hasMcporterSetup = currentCmd.includes("mcporter");
     const hasNode22Setup = currentCmd.includes("node_22.x");
     const hasNode22Fix = currentCmd.includes("update-alternatives");
@@ -798,7 +909,7 @@ function configureSandbox(api: any): boolean {
 
 // ─── sandbox recreate + gateway restart ──────────────────────────────────────
 
-function recreateSandboxAndRestart(api: any) {
+function recreateSandboxAndRestart(api: LoggerApi) {
   api.logger.info("[moltbank] recreating sandbox containers...");
   api.logger.info(
     "[moltbank] ⏳ waiting 8s before recreate (hot container protection)...",
@@ -847,7 +958,7 @@ function recreateSandboxAndRestart(api: any) {
 
 // ─── main setup ───────────────────────────────────────────────────────────────
 
-async function runSetup(cfg: any, api: any) {
+async function runSetup(cfg: MoltbankPluginConfig, api: LoggerApi) {
   let hostReady = false;
   const appBaseUrl = getAppBaseUrl(cfg);
   const skillName = getSkillName(cfg);
@@ -1007,29 +1118,33 @@ async function runSetup(cfg: any, api: any) {
   api.logger.info(`[moltbank]   mcporter: ${skillDir}/config/mcporter.json`);
   if (sandbox) {
     const finalConfig = readOpenclawConfig();
-    const finalEnv =
+    const finalEnv = asStringRecord(
       getNestedValue(finalConfig, [
         "agents",
         "defaults",
         "sandbox",
         "docker",
         "env",
-      ]) ?? {};
-    const finalNetwork = getNestedValue(finalConfig, [
-      "agents",
-      "defaults",
-      "sandbox",
-      "docker",
-      "network",
-    ]);
-    const finalCmd =
+      ]),
+    );
+    const finalNetwork = asString(
+      getNestedValue(finalConfig, [
+        "agents",
+        "defaults",
+        "sandbox",
+        "docker",
+        "network",
+      ]),
+    );
+    const finalCmd = asString(
       getNestedValue(finalConfig, [
         "agents",
         "defaults",
         "sandbox",
         "docker",
         "setupCommand",
-      ]) ?? "";
+      ]),
+    );
 
     api.logger.info(`[moltbank]   openclaw.json sandbox env:`);
     api.logger.info(
@@ -1075,8 +1190,9 @@ async function runSetup(cfg: any, api: any) {
 
 // ─── plugin register ──────────────────────────────────────────────────────────
 
-export default function register(api: any) {
-  const cfg = api.config?.plugins?.entries?.moltbank?.config ?? {};
+export default function register(api: PluginApi) {
+  const cfg: MoltbankPluginConfig =
+    api.config?.plugins?.entries?.moltbank?.config ?? {};
 
   api.registerService({
     id: "moltbank-setup",
@@ -1089,7 +1205,7 @@ export default function register(api: any) {
   });
 
   api.registerCli(
-    ({ program }: any) => {
+    ({ program }: { program: CliCommandLike }) => {
       program
         .command("moltbank")
         .description("MoltBank plugin commands")
