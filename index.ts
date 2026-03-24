@@ -127,6 +127,44 @@ function ensureMcporter(api: any) {
 
 // ─── skill install ───────────────────────────────────────────────────────────
 
+const SKILL_FILES = [
+  "skill.md",
+  "setup.md",
+  "onboarding.md",
+  "multi-org.md",
+  "tools-reference.md",
+  "x402-workflow.md",
+  "heartbeat.md",
+  "rules.md",
+  "skill.json",
+  "polymarket-workflow.md",
+  "polymarket-operation.md",
+  "polymarket-refill.md",
+  "openclaw-signer-eoa.md",
+  "openclaw-solana-signer.md",
+  "pumpfun-workflow.md",
+  "config/mcporter.json",
+  "scripts/openclaw-runtime-config.mjs",
+  "scripts/request-oauth-device-code.mjs",
+  "scripts/init-openclaw-signer.mjs",
+  "scripts/init-openclaw-solana-signer.mjs",
+  "scripts/bootstrap-openclaw-pumpfun-wallet.mjs",
+  "scripts/inspect-x402-requirements.mjs",
+  "scripts/inspect-solana-wallet.mjs",
+  "scripts/inspect-polygon-wallet.mjs",
+  "scripts/quote-solana-budget.mjs",
+  "scripts/polymarket-execute-lifi-tx.mjs",
+  "scripts/polymarket-signer-to-safe.mjs",
+  "scripts/poll-oauth-token.mjs",
+  "scripts/export-api-key.mjs",
+  "scripts/fetch-openrouter-intent.mjs",
+  "scripts/x402-pay-and-confirm.mjs",
+  "scripts/pumpportal-trade-local.mjs",
+  "scripts/moltbank.sh",
+  "scripts/moltbank.ps1",
+  "scripts/polymarket-service.mjs",
+];
+
 function ensureSkillInstalled(
   skillDir: string,
   appBaseUrl: string,
@@ -140,89 +178,25 @@ function ensureSkillInstalled(
     return true;
   }
 
-  api.logger.info("[moltbank] installing skill to " + skillDir);
+  api.logger.info(
+    `[moltbank] installing skill '${skillName}' to ${skillDir} (mode: ${mode})`,
+  );
   mkdirSync(skillDir, { recursive: true });
 
-  const workspaceOverride = dirname(dirname(skillDir));
+  const filesJson = JSON.stringify(SKILL_FILES).replace(/"/g, '\\"');
+  const installNode = run(
+    `node --input-type=module -e "import fs from 'fs'; import path from 'path'; const baseRaw=process.argv[1]; const dir=process.argv[2]; const files=JSON.parse(process.argv[3]); const base=baseRaw.endsWith('/') ? baseRaw.slice(0,-1) : baseRaw; fs.mkdirSync(dir,{recursive:true}); for (const f of files){ const u=base+'/'+f; const out=path.join(dir,f); fs.mkdirSync(path.dirname(out),{recursive:true}); const r=await fetch(u); if(!r.ok){ console.error('download failed',u,r.status); process.exit(2);} fs.writeFileSync(out, await r.text(),'utf8'); } fs.writeFileSync(path.join(dir,'.install_success'),'ok\\n','utf8');" "${appBaseUrl}" "${skillDir}" "${filesJson}"`,
+    { cwd: dirname(skillDir), silent: true },
+  );
 
-  if (IS_WIN && mode === "host") {
-    const files = [
-      "skill.md",
-      "setup.md",
-      "onboarding.md",
-      "multi-org.md",
-      "tools-reference.md",
-      "x402-workflow.md",
-      "heartbeat.md",
-      "rules.md",
-      "skill.json",
-      "polymarket-workflow.md",
-      "polymarket-operation.md",
-      "polymarket-refill.md",
-      "openclaw-signer-eoa.md",
-      "openclaw-solana-signer.md",
-      "pumpfun-workflow.md",
-      "config/mcporter.json",
-      "scripts/openclaw-runtime-config.mjs",
-      "scripts/request-oauth-device-code.mjs",
-      "scripts/init-openclaw-signer.mjs",
-      "scripts/init-openclaw-solana-signer.mjs",
-      "scripts/bootstrap-openclaw-pumpfun-wallet.mjs",
-      "scripts/inspect-x402-requirements.mjs",
-      "scripts/inspect-solana-wallet.mjs",
-      "scripts/inspect-polygon-wallet.mjs",
-      "scripts/quote-solana-budget.mjs",
-      "scripts/polymarket-execute-lifi-tx.mjs",
-      "scripts/polymarket-signer-to-safe.mjs",
-      "scripts/poll-oauth-token.mjs",
-      "scripts/export-api-key.mjs",
-      "scripts/fetch-openrouter-intent.mjs",
-      "scripts/x402-pay-and-confirm.mjs",
-      "scripts/pumpportal-trade-local.mjs",
-      "scripts/moltbank.sh",
-      "scripts/moltbank.ps1",
-      "scripts/polymarket-service.mjs",
-    ];
-    const filesJson = JSON.stringify(files).replace(/"/g, '\\"');
-    const installNode = run(
-      `node --input-type=module -e "import fs from 'fs'; import path from 'path'; const baseRaw=process.argv[1]; const dir=process.argv[2]; const files=JSON.parse(process.argv[3]); const base=baseRaw.endsWith('/') ? baseRaw.slice(0,-1) : baseRaw; fs.mkdirSync(dir,{recursive:true}); for (const f of files){ const u=base+'/'+f; const out=path.join(dir,f); fs.mkdirSync(path.dirname(out),{recursive:true}); const r=await fetch(u); if(!r.ok){ console.error('download failed',u,r.status); process.exit(2);} fs.writeFileSync(out, await r.text(),'utf8'); } fs.writeFileSync(path.join(dir,'.install_success'),'ok\\n','utf8');" "${appBaseUrl}" "${skillDir}" "${filesJson}"`,
-      { cwd: dirname(skillDir), silent: true },
-    );
-    if (installNode.ok) {
-      api.logger.info(
-        "[moltbank] ✓ skill installed at " +
-          skillDir +
-          " (windows direct download)",
-      );
-      return true;
-    }
-    api.logger.warn(
-      "[moltbank] ✗ skill install failed (windows direct download): " +
-        installNode.stderr,
-    );
-    return false;
-  }
-
-  // FIX: rm -f antes del curl para evitar "Failure writing output to destination"
-  // cuando /tmp/moltbank-install.sh ya existe con permisos bloqueados
-  const installCmd =
-    `rm -f /tmp/moltbank-install.sh && ` +
-    `curl -fsSL "${appBaseUrl}/install.sh" -o /tmp/moltbank-install.sh && ` +
-    `sed -i 's/\\r$//' /tmp/moltbank-install.sh && ` +
-    `APP_BASE_URL="${appBaseUrl}" MOLTBANK_SKILL_NAME="${skillName}" ` +
-    `OPENCLAW_WORKSPACE="${workspaceOverride}" ` +
-    `bash /tmp/moltbank-install.sh`;
-
-  const result = run(installCmd, { cwd: dirname(skillDir) });
-  if (result.ok) {
+  if (installNode.ok) {
     api.logger.info("[moltbank] ✓ skill installed at " + skillDir);
     return true;
-  } else {
-    api.logger.warn("[moltbank] ✗ skill install failed: " + result.stderr);
-    return false;
   }
-}
 
+  api.logger.warn("[moltbank] ✗ skill install failed: " + installNode.stderr);
+  return false;
+}
 // ─── SKILL.md uppercase + frontmatter ────────────────────────────────────────
 
 function ensureSkillFilesUppercase(skillDir: string, api: any) {
