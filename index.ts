@@ -1,5 +1,5 @@
 import { execSync } from 'child_process';
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { homedir } from 'os';
 const IS_WIN = process.platform === 'win32';
@@ -490,39 +490,126 @@ function ensureMoltbankAuth(skillDir: string, appBaseUrl: string, api: LoggerApi
   }
 
   const credsPath = getCredentialsPath();
-  api.logger.info('[moltbank] no valid credentials found — starting onboarding flow...');
+  const pendingPath = join(skillDir, '.oauth_device_code.json');
+  const now = Math.floor(Date.now() / 1000);
 
-  const requestCode = run(
-    `APP_BASE_URL="${appBaseUrl}" MOLTBANK_CREDENTIALS_PATH="${credsPath}" node "./scripts/request-oauth-device-code.mjs"`,
-    { cwd: skillDir, silent: true }
-  );
+  let deviceCode = '';
+  let userCode = '';
+  let verificationUri = `${appBaseUrl}/activate`;
+  let expiresAt = 0;
 
-  if (!requestCode.ok) {
-    api.logger.warn('[moltbank] ✗ could not request OAuth device code: ' + requestCode.stderr);
-    return false;
+  if (existsSync(pendingPath)) {
+    try {
+      const pending = JSON.parse(readFileSync(pendingPath, 'utf8')) as Record<string, unknown>;
+      const pendingDeviceCode = asString(pending.device_code);
+      const pendingUserCode = asString(pending.user_code);
+      const pendingVerificationUri = asString(pending.verification_uri, verificationUri);
+      const pendingExpiresAtRaw = pending.expires_at;
+      const pendingExpiresAt = typeof pendingExpiresAtRaw === 'number' ? pendingExpiresAtRaw : 0;
+
+      if (pendingDeviceCode && pendingUserCode && pendingExpiresAt > now + 5) {
+        deviceCode = pendingDeviceCode;
+        userCode = pendingUserCode;
+        verificationUri = pendingVerificationUri;
+        expiresAt = pendingExpiresAt;
+        api.logger.info(
+          `[moltbank] reusing pending OAuth device code (expires in ~${Math.max(1, Math.ceil((expiresAt - now) / 60))} min)`
+        );
+      } else {
+        unlinkSync(pendingPath);
+      }
+    } catch {
+      try {
+        unlinkSync(pendingPath);
+      } catch {
+        // ignore
+      }
+    }
   }
 
-  const codeJson = parseFirstJsonObject(requestCode.stdout);
-  const deviceCode = codeJson?.device_code;
-  const userCode = codeJson?.user_code;
-  const verificationUri = codeJson?.verification_uri || `${appBaseUrl}/activate`;
-
   if (!deviceCode || !userCode) {
-    api.logger.warn('[moltbank] ✗ onboarding response missing device_code/user_code');
-    return false;
+    api.logger.info('[moltbank] no valid credentials found — starting onboarding flow...');
+
+    const requestCode = run(
+      `APP_BASE_URL="${appBaseUrl}" MOLTBANK_CREDENTIALS_PATH="${credsPath}" node "./scripts/request-oauth-device-code.mjs"`,
+      { cwd: skillDir, silent: true }
+    );
+
+    if (!requestCode.ok) {
+      api.logger.warn('[moltbank] ✗ could not request OAuth device code: ' + requestCode.stderr);
+      return false;
+    }
+
+    const codeJson = parseFirstJsonObject(requestCode.stdout);
+    deviceCode = asString(codeJson?.device_code);
+    userCode = asString(codeJson?.user_code);
+    verificationUri = asString(codeJson?.verification_uri, `${appBaseUrl}/activate`);
+
+    const expiresInRaw = codeJson?.expires_in;
+    const expiresIn = typeof expiresInRaw === 'number' ? expiresInRaw : Number(expiresInRaw ?? 900);
+    const safeExpiresIn = Number.isFinite(expiresIn) && expiresIn > 0 ? Math.floor(expiresIn) : 900;
+    expiresAt = now + safeExpiresIn;
+
+    if (!deviceCode || !userCode) {
+      api.logger.warn('[moltbank] ✗ onboarding response missing device_code/user_code');
+      return false;
+    }
+
+    try {
+      writeFileSync(
+        pendingPath,
+        JSON.stringify(
+          {
+            device_code: deviceCode,
+            user_code: userCode,
+            verification_uri: verificationUri,
+            expires_at: expiresAt
+          },
+          null,
+          2
+        ) + '\n',
+        'utf8'
+      );
+    } catch (e) {
+      api.logger.warn('[moltbank] could not persist pending OAuth device code: ' + String(e));
+    }
+  } else {
+    api.logger.info('[moltbank] no valid credentials found — pending onboarding code already issued');
   }
 
   api.logger.info('[moltbank] ACTION REQUIRED: link this agent to your MoltBank account');
   api.logger.info(`[moltbank] 1) Open: ${verificationUri}`);
   api.logger.info(`[moltbank] 2) Enter code: ${userCode}`);
+  if (expiresAt > now) {
+    api.logger.info(`[moltbank] 3) Code expires in ~${Math.max(1, Math.ceil((expiresAt - now) / 60))} min`);
+  }
   api.logger.info('[moltbank] waiting for approval and polling token...');
 
   const poll = run(
     `APP_BASE_URL="${appBaseUrl}" MOLTBANK_CREDENTIALS_PATH="${credsPath}" node "./scripts/poll-oauth-token.mjs" "${deviceCode}" --save`,
-    { cwd: skillDir, silent: false }
+    { cwd: skillDir, silent: true }
   );
   if (!poll.ok) {
-    api.logger.warn('[moltbank] ✗ onboarding poll failed or timed out');
+    const pollJson = parseFirstJsonObject(`${poll.stdout}\n${poll.stderr}`);
+    let oauthError = '';
+    if (isRecord(pollJson) && isRecord(pollJson.payload)) {
+      oauthError = asString((pollJson.payload as Record<string, unknown>).error);
+    }
+
+    if (oauthError === 'invalid_grant') {
+      api.logger.warn('[moltbank] ✗ onboarding code expired or already consumed (invalid_grant)');
+      try {
+        if (existsSync(pendingPath)) unlinkSync(pendingPath);
+      } catch {
+        // ignore
+      }
+    } else {
+      api.logger.warn('[moltbank] ✗ onboarding poll failed or timed out');
+    }
+
+    if (poll.stderr) {
+      api.logger.warn('[moltbank] poll detail: ' + poll.stderr);
+    }
     return false;
   }
 
@@ -530,6 +617,12 @@ function ensureMoltbankAuth(skillDir: string, appBaseUrl: string, api: LoggerApi
   if (!after.ok) {
     api.logger.warn('[moltbank] ✗ onboarding finished but credentials are not usable');
     return false;
+  }
+
+  try {
+    if (existsSync(pendingPath)) unlinkSync(pendingPath);
+  } catch {
+    // ignore
   }
 
   api.logger.info(`[moltbank] ✓ onboarding completed (active org: ${after.activeOrg})`);
@@ -823,23 +916,23 @@ async function runSetup(cfg: MoltbankPluginConfig, api: LoggerApi) {
     api.logger.info('[moltbank] [sandbox 2/10] ensuring SKILL.md naming...');
     ensureSkillFilesUppercase(skillDir, api);
 
-    api.logger.info('[moltbank] [sandbox 3/10] installing skill npm dependencies...');
-    ensureNpmDeps(skillDir, api, 'sandbox');
-
-    api.logger.info('[moltbank] [sandbox 4/10] normalizing SKILL.md frontmatter...');
-    fixSkillFrontmatter(skillDir, skillName, api);
-
-    api.logger.info('[moltbank] [sandbox 5/10] applying permissions (chown + chmod)...');
-    ensureSkillPermissions(skillDir, api);
-
-    api.logger.info('[moltbank] [sandbox 6/10] writing/registering mcporter config...');
-    ensureMcporterConfig(skillDir, appBaseUrl, api);
-
-    api.logger.info('[moltbank] [sandbox 7/10] ensuring sandbox authentication...');
+    api.logger.info('[moltbank] [sandbox 3/10] ensuring sandbox authentication...');
     if (!ensureMoltbankAuth(skillDir, appBaseUrl, api)) {
       api.logger.warn('[moltbank] sandbox auth not ready — complete onboarding and run setup again');
       return;
     }
+
+    api.logger.info('[moltbank] [sandbox 4/10] installing skill npm dependencies...');
+    ensureNpmDeps(skillDir, api, 'sandbox');
+
+    api.logger.info('[moltbank] [sandbox 5/10] normalizing SKILL.md frontmatter...');
+    fixSkillFrontmatter(skillDir, skillName, api);
+
+    api.logger.info('[moltbank] [sandbox 6/10] applying permissions (chown + chmod)...');
+    ensureSkillPermissions(skillDir, api);
+
+    api.logger.info('[moltbank] [sandbox 7/10] writing/registering mcporter config...');
+    ensureMcporterConfig(skillDir, appBaseUrl, api);
 
     api.logger.info('[moltbank] [sandbox 8/10] configuring sandbox docker settings...');
     const sandboxChanged = configureSandbox(api);
@@ -869,13 +962,19 @@ async function runSetup(cfg: MoltbankPluginConfig, api: LoggerApi) {
     ensureSkillFilesUppercase(skillDir, api);
     fixSkillFrontmatter(skillDir, skillName, api);
 
-    api.logger.info('[moltbank] [host 4/7] installing skill npm dependencies...');
+    api.logger.info('[moltbank] [host 4/7] ensuring account onboarding/authentication...');
+    if (!ensureMoltbankAuth(skillDir, appBaseUrl, api)) {
+      api.logger.warn('[moltbank] host auth not ready — complete onboarding and run setup again');
+      return;
+    }
+
+    api.logger.info('[moltbank] [host 5/7] installing skill npm dependencies...');
     ensureNpmDeps(skillDir, api, 'host');
 
-    api.logger.info('[moltbank] [host 5/7] writing/registering mcporter config...');
+    api.logger.info('[moltbank] [host 6/7] writing/registering mcporter config...');
     ensureMcporterConfig(skillDir, appBaseUrl, api);
 
-    api.logger.info('[moltbank] [host 6/7] running wrapper smoke test...');
+    api.logger.info('[moltbank] [host 7/7] running wrapper smoke test...');
     // FIX: usar path absoluto para el .ps1 en Windows
     const ps1Path = join(skillDir, 'scripts', 'moltbank.ps1');
     const smokeCmd = IS_WIN
@@ -888,12 +987,6 @@ async function runSetup(cfg: MoltbankPluginConfig, api: LoggerApi) {
       api.logger.info('[moltbank] host smoke test passed (`moltbank list MoltBank`)');
     }
     hostReady = smoke.ok;
-
-    api.logger.info('[moltbank] [host 7/7] ensuring account onboarding/authentication...');
-    if (!ensureMoltbankAuth(skillDir, appBaseUrl, api)) {
-      api.logger.warn('[moltbank] host auth not ready — complete onboarding and run setup again');
-      return;
-    }
 
     api.logger.info('[moltbank] host mode — setup completed with onboarding flow');
   }
