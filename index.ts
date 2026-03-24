@@ -190,6 +190,48 @@ function setNestedValue(obj: Record<string, unknown>, path: string[], value: unk
   current[path[path.length - 1]] = value;
 }
 
+function cleanupStaleMoltbankPluginLoadPaths(api: LoggerApi): boolean {
+  try {
+    const config = readOpenclawConfig();
+    const loadPathsPath = ['plugins', 'load', 'paths'];
+    const current = getNestedValue(config, loadPathsPath);
+    if (!Array.isArray(current)) return false;
+
+    const removed: string[] = [];
+    const next: unknown[] = [];
+
+    for (const entry of current) {
+      if (typeof entry !== 'string') {
+        next.push(entry);
+        continue;
+      }
+
+      const normalized = entry.replace(/\\/g, '/').toLowerCase();
+      const looksLikeMoltbankPath = normalized.includes('moltbank');
+      if (looksLikeMoltbankPath && !existsSync(entry)) {
+        removed.push(entry);
+        continue;
+      }
+
+      next.push(entry);
+    }
+
+    if (removed.length === 0) {
+      api.logger.info('[moltbank] ✓ no stale MoltBank plugin load paths found');
+      return false;
+    }
+
+    setNestedValue(config, loadPathsPath, next);
+    writeOpenclawConfig(config);
+    api.logger.info(`[moltbank] ✓ removed stale MoltBank plugin load path(s): ${removed.join(', ')}`);
+    return true;
+  } catch (e) {
+    api.logger.warn('[moltbank] could not clean stale MoltBank plugin load paths: ' + String(e));
+    return false;
+  }
+}
+
+
 // ─── mcporter ────────────────────────────────────────────────────────────────
 
 function ensureMcporter(api: LoggerApi) {
@@ -512,9 +554,7 @@ function ensureMoltbankAuth(skillDir: string, appBaseUrl: string, api: LoggerApi
         userCode = pendingUserCode;
         verificationUri = pendingVerificationUri;
         expiresAt = pendingExpiresAt;
-        api.logger.info(
-          `[moltbank] reusing pending OAuth device code (expires in ~${Math.max(1, Math.ceil((expiresAt - now) / 60))} min)`
-        );
+        api.logger.info(`[moltbank] reusing pending OAuth device code (expires in ~${Math.max(1, Math.ceil((expiresAt - now) / 60))} min)`);
       } else {
         unlinkSync(pendingPath);
       }
@@ -899,6 +939,8 @@ async function runSetup(cfg: MoltbankPluginConfig, api: LoggerApi) {
   api.logger.info(`[moltbank] skill dir: ${skillDir}`);
   api.logger.info(`[moltbank] base url:  ${appBaseUrl}`);
   api.logger.info(`[moltbank] ══════════════════════════════════════`);
+  api.logger.info('[moltbank] preflight: cleaning stale MoltBank plugin load paths...');
+  cleanupStaleMoltbankPluginLoadPaths(api);
 
   if (sandbox) {
     api.logger.info('[moltbank] configuring sandbox mode...');
@@ -948,33 +990,36 @@ async function runSetup(cfg: MoltbankPluginConfig, api: LoggerApi) {
       api.logger.info('[moltbank] sandbox unchanged — no restart needed');
     }
   } else {
-    api.logger.info('[moltbank] [host 1/7] ensuring mcporter on host...');
+    api.logger.info('[moltbank] [host 1/8] ensuring mcporter on host...');
     ensureMcporter(api);
 
-    api.logger.info('[moltbank] [host 2/7] installing skill files...');
+    api.logger.info('[moltbank] [host 2/8] installing skill files...');
     const installed = ensureSkillInstalled(skillDir, appBaseUrl, skillName, api, 'host');
     if (!installed) {
       api.logger.warn('[moltbank] host setup aborted: skill install failed. Verify install.sh/base URL and retry.');
       return;
     }
 
-    api.logger.info('[moltbank] [host 3/7] ensuring SKILL.md naming/frontmatter...');
+    api.logger.info('[moltbank] [host 3/8] ensuring SKILL.md naming/frontmatter...');
     ensureSkillFilesUppercase(skillDir, api);
     fixSkillFrontmatter(skillDir, skillName, api);
 
-    api.logger.info('[moltbank] [host 4/7] ensuring account onboarding/authentication...');
+    api.logger.info('[moltbank] [host 4/8] ensuring account onboarding/authentication...');
     if (!ensureMoltbankAuth(skillDir, appBaseUrl, api)) {
       api.logger.warn('[moltbank] host auth not ready — complete onboarding and run setup again');
       return;
     }
 
-    api.logger.info('[moltbank] [host 5/7] installing skill npm dependencies...');
+    api.logger.info('[moltbank] [host 5/8] installing skill npm dependencies...');
     ensureNpmDeps(skillDir, api, 'host');
 
-    api.logger.info('[moltbank] [host 6/7] writing/registering mcporter config...');
+    api.logger.info('[moltbank] [host 6/8] applying permissions (chown + chmod)...');
+    ensureSkillPermissions(skillDir, api);
+
+    api.logger.info('[moltbank] [host 7/8] writing/registering mcporter config...');
     ensureMcporterConfig(skillDir, appBaseUrl, api);
 
-    api.logger.info('[moltbank] [host 7/7] running wrapper smoke test...');
+    api.logger.info('[moltbank] [host 8/8] running wrapper smoke test...');
     // FIX: usar path absoluto para el .ps1 en Windows
     const ps1Path = join(skillDir, 'scripts', 'moltbank.ps1');
     const smokeCmd = IS_WIN
