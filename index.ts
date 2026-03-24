@@ -1,5 +1,5 @@
 import { execSync } from 'child_process';
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { homedir } from 'os';
 const IS_WIN = process.platform === 'win32';
@@ -231,7 +231,6 @@ function cleanupStaleMoltbankPluginLoadPaths(api: LoggerApi): boolean {
   }
 }
 
-
 // ─── mcporter ────────────────────────────────────────────────────────────────
 
 function ensureMcporter(api: LoggerApi) {
@@ -246,6 +245,19 @@ function ensureMcporter(api: LoggerApi) {
     api.logger.info('[moltbank] ✓ mcporter installed');
   } else {
     api.logger.warn('[moltbank] ✗ mcporter install failed: ' + result.stderr);
+  }
+}
+
+function ensureWrapperExecutable(skillDir: string, api: LoggerApi): void {
+  if (IS_WIN) return;
+  const wrapperPath = join(skillDir, 'scripts', 'moltbank.sh');
+  if (!existsSync(wrapperPath)) return;
+
+  try {
+    chmodSync(wrapperPath, 0o755);
+    api.logger.info('[moltbank] ✓ wrapper script permissions ensured (scripts/moltbank.sh)');
+  } catch (e) {
+    api.logger.warn('[moltbank] could not ensure wrapper executable bit: ' + String(e));
   }
 }
 
@@ -298,6 +310,7 @@ function ensureSkillInstalled(
 ) {
   const successFlag = join(skillDir, '.install_success');
   if (existsSync(successFlag)) {
+    ensureWrapperExecutable(skillDir, api);
     api.logger.info('[moltbank] ✓ skill already installed at ' + skillDir);
     return true;
   }
@@ -312,6 +325,7 @@ function ensureSkillInstalled(
   );
 
   if (installNode.ok) {
+    ensureWrapperExecutable(skillDir, api);
     api.logger.info('[moltbank] ✓ skill installed at ' + skillDir);
     return true;
   }
@@ -625,8 +639,13 @@ function ensureMoltbankAuth(skillDir: string, appBaseUrl: string, api: LoggerApi
   }
   api.logger.info('[moltbank] waiting for approval and polling token...');
 
+  const pollTimeoutSeconds = Number(process.env.MOLTBANK_OAUTH_POLL_TIMEOUT_SECONDS ?? 180);
+  const safePollTimeoutSeconds = Number.isFinite(pollTimeoutSeconds) && pollTimeoutSeconds > 0 ? Math.floor(pollTimeoutSeconds) : 180;
+  const pollIntervalSeconds = Number(process.env.MOLTBANK_OAUTH_POLL_INTERVAL_SECONDS ?? 5);
+  const safePollIntervalSeconds = Number.isFinite(pollIntervalSeconds) && pollIntervalSeconds > 0 ? Math.floor(pollIntervalSeconds) : 5;
+
   const poll = run(
-    `APP_BASE_URL="${appBaseUrl}" MOLTBANK_CREDENTIALS_PATH="${credsPath}" node "./scripts/poll-oauth-token.mjs" "${deviceCode}" --save`,
+    `APP_BASE_URL=\"${appBaseUrl}\" MOLTBANK_CREDENTIALS_PATH=\"${credsPath}\" node \"./scripts/poll-oauth-token.mjs\" \"${deviceCode}\" ${safePollTimeoutSeconds} ${safePollIntervalSeconds} --save`,
     { cwd: skillDir, silent: true }
   );
   if (!poll.ok) {
@@ -958,20 +977,20 @@ async function runSetup(cfg: MoltbankPluginConfig, api: LoggerApi) {
     api.logger.info('[moltbank] [sandbox 2/10] ensuring SKILL.md naming...');
     ensureSkillFilesUppercase(skillDir, api);
 
-    api.logger.info('[moltbank] [sandbox 3/10] ensuring sandbox authentication...');
+    api.logger.info('[moltbank] [sandbox 3/10] applying permissions (chown + chmod)...');
+    ensureSkillPermissions(skillDir, api);
+
+    api.logger.info('[moltbank] [sandbox 4/10] ensuring sandbox authentication...');
     if (!ensureMoltbankAuth(skillDir, appBaseUrl, api)) {
       api.logger.warn('[moltbank] sandbox auth not ready — complete onboarding and run setup again');
       return;
     }
 
-    api.logger.info('[moltbank] [sandbox 4/10] installing skill npm dependencies...');
+    api.logger.info('[moltbank] [sandbox 5/10] installing skill npm dependencies...');
     ensureNpmDeps(skillDir, api, 'sandbox');
 
-    api.logger.info('[moltbank] [sandbox 5/10] normalizing SKILL.md frontmatter...');
+    api.logger.info('[moltbank] [sandbox 6/10] normalizing SKILL.md frontmatter...');
     fixSkillFrontmatter(skillDir, skillName, api);
-
-    api.logger.info('[moltbank] [sandbox 6/10] applying permissions (chown + chmod)...');
-    ensureSkillPermissions(skillDir, api);
 
     api.logger.info('[moltbank] [sandbox 7/10] writing/registering mcporter config...');
     ensureMcporterConfig(skillDir, appBaseUrl, api);
@@ -1004,17 +1023,17 @@ async function runSetup(cfg: MoltbankPluginConfig, api: LoggerApi) {
     ensureSkillFilesUppercase(skillDir, api);
     fixSkillFrontmatter(skillDir, skillName, api);
 
-    api.logger.info('[moltbank] [host 4/8] ensuring account onboarding/authentication...');
+    api.logger.info('[moltbank] [host 4/8] applying permissions (chown + chmod)...');
+    ensureSkillPermissions(skillDir, api);
+
+    api.logger.info('[moltbank] [host 5/8] ensuring account onboarding/authentication...');
     if (!ensureMoltbankAuth(skillDir, appBaseUrl, api)) {
       api.logger.warn('[moltbank] host auth not ready — complete onboarding and run setup again');
       return;
     }
 
-    api.logger.info('[moltbank] [host 5/8] installing skill npm dependencies...');
+    api.logger.info('[moltbank] [host 6/8] installing skill npm dependencies...');
     ensureNpmDeps(skillDir, api, 'host');
-
-    api.logger.info('[moltbank] [host 6/8] applying permissions (chown + chmod)...');
-    ensureSkillPermissions(skillDir, api);
 
     api.logger.info('[moltbank] [host 7/8] writing/registering mcporter config...');
     ensureMcporterConfig(skillDir, appBaseUrl, api);
