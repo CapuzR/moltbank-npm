@@ -84,6 +84,13 @@ function asStringRecord(value: unknown): Record<string, string> {
   return out;
 }
 
+function getSetupAuthWaitMode(defaultMode: AuthWaitMode): AuthWaitMode {
+  const raw = asString(process.env.MOLTBANK_SETUP_AUTH_WAIT_MODE).trim().toLowerCase();
+  if (raw === 'blocking' || raw === 'wait') return 'blocking';
+  if (raw === 'nonblocking' || raw === 'nowait') return 'nonblocking';
+  return defaultMode;
+}
+
 function getExecErrorMessage(error: unknown): string {
   if (isRecord(error) && 'stderr' in error) {
     const stderr = (error as { stderr?: unknown }).stderr;
@@ -1164,9 +1171,25 @@ export default function register(api: PluginApi) {
         .addCommand(
           program
             .createCommand('setup')
-            .description('Re-run full MoltBank setup')
+            .description('Re-run MoltBank setup (nonblocking auth by default)')
             .action(async () => {
               console.log('Running MoltBank setup...');
+              const authWaitMode = getSetupAuthWaitMode('nonblocking');
+              if (authWaitMode === 'nonblocking') {
+                console.log('[moltbank] setup auth mode: nonblocking (default for channel reliability)');
+                console.log('[moltbank] set MOLTBANK_SETUP_AUTH_WAIT_MODE=blocking to wait for OAuth approval');
+              } else {
+                console.log('[moltbank] setup auth mode: blocking (waiting for OAuth approval)');
+              }
+              await runSetup(cfg, { logger: console }, { authWaitMode });
+            })
+        )
+        .addCommand(
+          program
+            .createCommand('setup-blocking')
+            .description('Re-run full MoltBank setup and wait for OAuth approval')
+            .action(async () => {
+              console.log('Running MoltBank setup (blocking auth mode)...');
               await runSetup(cfg, { logger: console }, { authWaitMode: 'blocking' });
             })
         )
