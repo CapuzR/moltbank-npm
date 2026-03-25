@@ -64,6 +64,7 @@ interface PluginApi extends LoggerApi {
 
 type AuthWaitMode = 'blocking' | 'nonblocking';
 const oauthPollers = new Map<string, ReturnType<typeof spawn>>();
+const backgroundFinalizers = new Map<string, ReturnType<typeof spawn>>();
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -590,7 +591,6 @@ function readPendingOauthCode(skillDir: string): {
 function startBackgroundOauthPoll(
   skillDir: string,
   appBaseUrl: string,
-  skillName: string,
   credsPath: string,
   deviceCode: string,
   timeoutSeconds: number,
@@ -653,7 +653,7 @@ function startBackgroundOauthPoll(
       }
       api.logger.info(`[moltbank] ✓ background onboarding completed (active org: ${after.activeOrg})`);
       try {
-        finalizeSetupAfterAuth(skillDir, appBaseUrl, skillName, api);
+        startBackgroundFinalizeAfterAuth(skillDir, appBaseUrl, api);
       } catch (e) {
         api.logger.warn('[moltbank] background finalize after auth failed: ' + String(e));
       }
@@ -690,55 +690,76 @@ function stopBackgroundOauthPoll(skillDir: string): void {
   oauthPollers.delete(skillDir);
 }
 
-function finalizeSetupAfterAuth(skillDir: string, appBaseUrl: string, skillName: string, api: LoggerApi): void {
-  const sandbox = isSandboxEnabled();
-
-  if (sandbox) {
-    api.logger.info('[moltbank] background auth complete — finalizing sandbox setup...');
-    ensureNpmDeps(skillDir, api, 'sandbox');
-    ensureSkillFilesUppercase(skillDir, api);
-    fixSkillFrontmatter(skillDir, skillName, api);
-    ensureMcporterConfig(skillDir, appBaseUrl, api);
-    const sandboxChanged = configureSandbox(api);
-    const envChanged = injectSandboxEnv(skillDir, api);
-    if (sandboxChanged || envChanged) {
-      api.logger.info('[moltbank] background finalize changed sandbox config — recreating sandbox');
-      recreateSandboxAndRestart(api);
-    } else {
-      api.logger.info('[moltbank] background finalize complete (sandbox unchanged)');
-    }
+function startBackgroundFinalizeAfterAuth(skillDir: string, appBaseUrl: string, api: LoggerApi): void {
+  const existing = backgroundFinalizers.get(skillDir);
+  if (existing && existing.exitCode === null && !existing.killed) {
+    api.logger.info('[moltbank] background finalize already running');
     return;
   }
+  if (existing) backgroundFinalizers.delete(skillDir);
 
-  api.logger.info('[moltbank] background auth complete — finalizing host setup...');
-  ensureNpmDeps(skillDir, api, 'host');
-  ensureSkillFilesUppercase(skillDir, api);
-  fixSkillFrontmatter(skillDir, skillName, api);
-  ensureMcporterConfig(skillDir, appBaseUrl, api);
+  const child = spawn('openclaw', ['moltbank', 'setup-blocking'], {
+    cwd: skillDir,
+    env: {
+      ...process.env,
+      APP_BASE_URL: appBaseUrl,
+      MOLTBANK_SETUP_AUTH_WAIT_MODE: 'blocking'
+    },
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
 
-  const ps1Path = join(skillDir, 'scripts', 'moltbank.ps1');
-  const smokeCmd = IS_WIN
-    ? `powershell -NoProfile -ExecutionPolicy Bypass -File "${ps1Path}" list MoltBank`
-    : `"${skillDir}/scripts/moltbank.sh" list MoltBank`;
-  const smoke = run(smokeCmd, { cwd: skillDir, silent: true });
-  if (!smoke.ok) {
-    api.logger.warn('[moltbank] background finalize: host smoke test failed (`moltbank list MoltBank`)');
-  } else {
-    api.logger.info('[moltbank] ✓ background finalize: host ready (`moltbank list MoltBank`)');
+  backgroundFinalizers.set(skillDir, child);
+  api.logger.info(`[moltbank] background finalize subprocess started (pid: ${child.pid ?? 'unknown'})`);
+
+  let stdoutBuf = '';
+  let stderrBuf = '';
+  child.stdout.on('data', (chunk: Buffer) => {
+    if (stdoutBuf.length < 8000) stdoutBuf += chunk.toString();
+  });
+  child.stderr.on('data', (chunk: Buffer) => {
+    if (stderrBuf.length < 8000) stderrBuf += chunk.toString();
+  });
+
+  child.on('error', (error) => {
+    backgroundFinalizers.delete(skillDir);
+    api.logger.warn('[moltbank] background finalize failed to start: ' + String(error));
+  });
+
+  child.on('close', (code) => {
+    backgroundFinalizers.delete(skillDir);
+    if (code === 0) {
+      api.logger.info('[moltbank] ✓ background finalize completed');
+      return;
+    }
+
+    api.logger.warn(`[moltbank] background finalize exited with code ${String(code ?? 'unknown')}`);
+    const detail = (stderrBuf || stdoutBuf).trim();
+    if (detail) {
+      api.logger.warn('[moltbank] background finalize detail: ' + detail);
+    }
+  });
+}
+
+function stopBackgroundFinalize(skillDir: string): void {
+  const existing = backgroundFinalizers.get(skillDir);
+  if (!existing) return;
+  if (existing.exitCode === null && !existing.killed) {
+    existing.kill();
   }
+  backgroundFinalizers.delete(skillDir);
 }
 
 function ensureMoltbankAuth(
   skillDir: string,
   appBaseUrl: string,
   api: LoggerApi,
-  options: { waitForApproval?: boolean; skillName?: string } = {}
+  options: { waitForApproval?: boolean } = {}
 ): boolean {
   const waitForApproval = options.waitForApproval ?? true;
-  const skillName = options.skillName ?? getSkillName({});
   if (waitForApproval) {
     // Avoid racing sync polling with the nonblocking background poller.
     stopBackgroundOauthPoll(skillDir);
+    stopBackgroundFinalize(skillDir);
   }
   const existing = parseActiveTokenFromCredentials();
   if (existing.ok) {
@@ -844,7 +865,7 @@ function ensureMoltbankAuth(
   if (!waitForApproval) {
     api.logger.info('[moltbank] nonblocking startup mode: skipping OAuth polling to keep gateway/channel startup responsive');
     const backgroundTimeoutSeconds = Math.max(30, expiresAt - now - 5);
-    startBackgroundOauthPoll(skillDir, appBaseUrl, skillName, credsPath, deviceCode, backgroundTimeoutSeconds, api);
+    startBackgroundOauthPoll(skillDir, appBaseUrl, credsPath, deviceCode, backgroundTimeoutSeconds, api);
     api.logger.info('[moltbank] once approved in browser, setup finalization will continue automatically');
     api.logger.info('[moltbank] optional immediate check: `openclaw moltbank auth-status`');
     return false;
@@ -906,7 +927,9 @@ function printAuthStatus(skillDir: string, appBaseUrl: string, api: LoggerApi): 
   const existing = parseActiveTokenFromCredentials();
   const pending = readPendingOauthCode(skillDir);
   const poller = oauthPollers.get(skillDir);
+  const finalizer = backgroundFinalizers.get(skillDir);
   const pollerRunning = Boolean(poller && poller.exitCode === null && !poller.killed);
+  const finalizerRunning = Boolean(finalizer && finalizer.exitCode === null && !finalizer.killed);
 
   api.logger.info('[moltbank] auth status:');
   if (existing.ok) {
@@ -925,6 +948,7 @@ function printAuthStatus(skillDir: string, appBaseUrl: string, api: LoggerApi): 
   }
 
   api.logger.info(`[moltbank]   background poll: ${pollerRunning ? 'running' : 'idle'}`);
+  api.logger.info(`[moltbank]   background finalize: ${finalizerRunning ? 'running' : 'idle'}`);
   if (!existing.ok && !pending) {
     api.logger.info('[moltbank]   hint: run `openclaw moltbank setup` to start onboarding');
   }
@@ -1224,7 +1248,7 @@ async function runSetup(cfg: MoltbankPluginConfig, api: LoggerApi, options: { au
     ensureSkillPermissions(skillDir, api);
 
     api.logger.info('[moltbank] [sandbox 4/10] ensuring sandbox authentication...');
-    if (!ensureMoltbankAuth(skillDir, appBaseUrl, api, { waitForApproval: waitForAuth, skillName })) {
+    if (!ensureMoltbankAuth(skillDir, appBaseUrl, api, { waitForApproval: waitForAuth })) {
       if (!waitForAuth) {
         api.logger.warn('[moltbank] sandbox auth pending — startup continues without blocking channel startup');
         api.logger.info('[moltbank] setup will finalize automatically after browser approval');
@@ -1276,7 +1300,7 @@ async function runSetup(cfg: MoltbankPluginConfig, api: LoggerApi, options: { au
     ensureSkillPermissions(skillDir, api);
 
     api.logger.info('[moltbank] [host 5/8] ensuring account onboarding/authentication...');
-    if (!ensureMoltbankAuth(skillDir, appBaseUrl, api, { waitForApproval: waitForAuth, skillName })) {
+    if (!ensureMoltbankAuth(skillDir, appBaseUrl, api, { waitForApproval: waitForAuth })) {
       if (!waitForAuth) {
         api.logger.warn('[moltbank] host auth pending — startup continues without blocking channel startup');
         api.logger.info('[moltbank] setup will finalize automatically after browser approval');
@@ -1367,6 +1391,7 @@ export default function register(api: PluginApi) {
     },
     stop: async () => {
       stopBackgroundOauthPoll(getSkillDir(cfg));
+      stopBackgroundFinalize(getSkillDir(cfg));
       api.logger.info('[moltbank] plugin stopped');
     }
   });
