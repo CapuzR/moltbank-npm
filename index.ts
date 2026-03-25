@@ -860,7 +860,7 @@ function ensureMoltbankAuth(
   if (expiresAt > now) {
     api.logger.info(`[moltbank] 3) Code expires in ~${Math.max(1, Math.ceil((expiresAt - now) / 60))} min`);
   }
-  api.logger.info('[moltbank] 4) After approving, reply in chat: "MoltBank done"');
+  api.logger.info('[moltbank] 4) Optional: reply in chat "MoltBank done" for a live status check');
 
   if (!waitForApproval) {
     api.logger.info('[moltbank] nonblocking startup mode: skipping OAuth polling to keep gateway/channel startup responsive');
