@@ -620,21 +620,15 @@ function startBackgroundOauthPoll(
         APP_BASE_URL: appBaseUrl,
         MOLTBANK_CREDENTIALS_PATH: credsPath
       },
-      stdio: ['ignore', 'pipe', 'pipe']
+      stdio: 'ignore',    // Ignore logs so it doesn't hang the parent
+      detached: true      // Detach from the parent process
     }
   );
 
+  child.unref();          // Tell Node not to wait for this process
+  
   oauthPollers.set(skillDir, child);
   api.logger.info(`[moltbank] background OAuth poll started (pid: ${child.pid ?? 'unknown'})`);
-
-  let stdoutBuf = '';
-  let stderrBuf = '';
-  child.stdout.on('data', (chunk: Buffer) => {
-    if (stdoutBuf.length < 8000) stdoutBuf += chunk.toString();
-  });
-  child.stderr.on('data', (chunk: Buffer) => {
-    if (stderrBuf.length < 8000) stderrBuf += chunk.toString();
-  });
 
   child.on('error', (error) => {
     oauthPollers.delete(skillDir);
@@ -657,26 +651,8 @@ function startBackgroundOauthPoll(
       } catch (e) {
         api.logger.warn('[moltbank] background finalize after auth failed: ' + String(e));
       }
-      return;
-    }
-
-    const pollJson = parseFirstJsonObject(`${stdoutBuf}\n${stderrBuf}`);
-    let oauthError = '';
-    if (isRecord(pollJson) && isRecord(pollJson.payload)) {
-      oauthError = asString((pollJson.payload as Record<string, unknown>).error);
-    }
-
-    if (oauthError === 'authorization_pending') {
-      api.logger.warn('[moltbank] background OAuth poll ended while authorization is still pending');
-    } else if (oauthError === 'invalid_grant') {
-      api.logger.warn('[moltbank] background OAuth poll ended: code expired or already consumed (invalid_grant)');
-    } else if (code !== 0) {
+    } else {
       api.logger.warn(`[moltbank] background OAuth poll exited with code ${String(code ?? 'unknown')}`);
-    }
-
-    const detail = stderrBuf.trim();
-    if (detail) {
-      api.logger.warn('[moltbank] background OAuth poll detail: ' + detail);
     }
   });
 }
@@ -705,20 +681,14 @@ function startBackgroundFinalizeAfterAuth(skillDir: string, appBaseUrl: string, 
       APP_BASE_URL: appBaseUrl,
       MOLTBANK_SETUP_AUTH_WAIT_MODE: 'blocking'
     },
-    stdio: ['ignore', 'pipe', 'pipe']
+    stdio: 'ignore',      // Ignore logs so it doesn't hang the parent
+    detached: true        // Detach from the parent process
   });
 
+  child.unref();          // Tell Node not to wait for this process
+  
   backgroundFinalizers.set(skillDir, child);
   api.logger.info(`[moltbank] background finalize subprocess started (pid: ${child.pid ?? 'unknown'})`);
-
-  let stdoutBuf = '';
-  let stderrBuf = '';
-  child.stdout.on('data', (chunk: Buffer) => {
-    if (stdoutBuf.length < 8000) stdoutBuf += chunk.toString();
-  });
-  child.stderr.on('data', (chunk: Buffer) => {
-    if (stderrBuf.length < 8000) stderrBuf += chunk.toString();
-  });
 
   child.on('error', (error) => {
     backgroundFinalizers.delete(skillDir);
@@ -729,13 +699,8 @@ function startBackgroundFinalizeAfterAuth(skillDir: string, appBaseUrl: string, 
     backgroundFinalizers.delete(skillDir);
     if (code === 0) {
       api.logger.info('[moltbank] ✓ background finalize completed');
-      return;
-    }
-
-    api.logger.warn(`[moltbank] background finalize exited with code ${String(code ?? 'unknown')}`);
-    const detail = (stderrBuf || stdoutBuf).trim();
-    if (detail) {
-      api.logger.warn('[moltbank] background finalize detail: ' + detail);
+    } else {
+      api.logger.warn(`[moltbank] background finalize exited with code ${String(code ?? 'unknown')}`);
     }
   });
 }
@@ -749,12 +714,7 @@ function stopBackgroundFinalize(skillDir: string): void {
   backgroundFinalizers.delete(skillDir);
 }
 
-function ensureMoltbankAuth(
-  skillDir: string,
-  appBaseUrl: string,
-  api: LoggerApi,
-  options: { waitForApproval?: boolean } = {}
-): boolean {
+function ensureMoltbankAuth(skillDir: string, appBaseUrl: string, api: LoggerApi, options: { waitForApproval?: boolean } = {}): boolean {
   const waitForApproval = options.waitForApproval ?? true;
   if (waitForApproval) {
     // Avoid racing sync polling with the nonblocking background poller.
