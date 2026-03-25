@@ -106,12 +106,13 @@ function getExecErrorMessage(error: unknown): string {
   return String(error);
 }
 
-function run(cmd: string, opts: { cwd?: string; silent?: boolean } = {}) {
+function run(cmd: string, opts: { cwd?: string; silent?: boolean; env?: Record<string, string | undefined> } = {}) {
   try {
+    const mergedEnv: NodeJS.ProcessEnv = { ...process.env, ...(opts.env ?? {}) };
     const out = execSync(cmd, {
       cwd: opts.cwd,
       stdio: opts.silent ? 'pipe' : 'inherit',
-      env: { ...process.env },
+      env: mergedEnv,
       shell: IS_WIN ? (process.env.ComSpec ?? 'cmd.exe') : '/bin/bash'
     });
     return { ok: true, stdout: out?.toString().trim() ?? '' };
@@ -620,13 +621,13 @@ function startBackgroundOauthPoll(
         APP_BASE_URL: appBaseUrl,
         MOLTBANK_CREDENTIALS_PATH: credsPath
       },
-      stdio: 'ignore',    // Ignore logs so it doesn't hang the parent
-      detached: true      // Detach from the parent process
+      stdio: 'ignore', // Ignore logs so it doesn't hang the parent
+      detached: true // Detach from the parent process
     }
   );
 
-  child.unref();          // Tell Node not to wait for this process
-  
+  child.unref(); // Tell Node not to wait for this process
+
   oauthPollers.set(skillDir, child);
   api.logger.info(`[moltbank] background OAuth poll started (pid: ${child.pid ?? 'unknown'})`);
 
@@ -681,12 +682,12 @@ function startBackgroundFinalizeAfterAuth(skillDir: string, appBaseUrl: string, 
       APP_BASE_URL: appBaseUrl,
       MOLTBANK_SETUP_AUTH_WAIT_MODE: 'blocking'
     },
-    stdio: 'ignore',      // Ignore logs so it doesn't hang the parent
-    detached: true        // Detach from the parent process
+    stdio: 'ignore', // Ignore logs so it doesn't hang the parent
+    detached: true // Detach from the parent process
   });
 
-  child.unref();          // Tell Node not to wait for this process
-  
+  child.unref(); // Tell Node not to wait for this process
+
   backgroundFinalizers.set(skillDir, child);
   api.logger.info(`[moltbank] background finalize subprocess started (pid: ${child.pid ?? 'unknown'})`);
 
@@ -767,10 +768,14 @@ function ensureMoltbankAuth(skillDir: string, appBaseUrl: string, api: LoggerApi
   if (!deviceCode || !userCode) {
     api.logger.info('[moltbank] no valid credentials found — starting onboarding flow...');
 
-    const requestCode = run(
-      `APP_BASE_URL="${appBaseUrl}" MOLTBANK_CREDENTIALS_PATH="${credsPath}" node "./scripts/request-oauth-device-code.mjs"`,
-      { cwd: skillDir, silent: true }
-    );
+    const requestCode = run(`"${process.execPath}" "./scripts/request-oauth-device-code.mjs"`, {
+      cwd: skillDir,
+      silent: true,
+      env: {
+        APP_BASE_URL: appBaseUrl,
+        MOLTBANK_CREDENTIALS_PATH: credsPath
+      }
+    });
 
     if (!requestCode.ok) {
       api.logger.warn('[moltbank] ✗ could not request OAuth device code: ' + requestCode.stderr);
@@ -839,8 +844,15 @@ function ensureMoltbankAuth(skillDir: string, appBaseUrl: string, api: LoggerApi
   const safePollIntervalSeconds = Number.isFinite(pollIntervalSeconds) && pollIntervalSeconds > 0 ? Math.floor(pollIntervalSeconds) : 5;
 
   const poll = run(
-    `APP_BASE_URL=\"${appBaseUrl}\" MOLTBANK_CREDENTIALS_PATH=\"${credsPath}\" node \"./scripts/poll-oauth-token.mjs\" \"${deviceCode}\" ${safePollTimeoutSeconds} ${safePollIntervalSeconds} --save`,
-    { cwd: skillDir, silent: true }
+    `"${process.execPath}" "./scripts/poll-oauth-token.mjs" "${deviceCode}" ${safePollTimeoutSeconds} ${safePollIntervalSeconds} --save`,
+    {
+      cwd: skillDir,
+      silent: true,
+      env: {
+        APP_BASE_URL: appBaseUrl,
+        MOLTBANK_CREDENTIALS_PATH: credsPath
+      }
+    }
   );
   if (!poll.ok) {
     const pollJson = parseFirstJsonObject(`${poll.stdout}\n${poll.stderr}`);
@@ -1019,9 +1031,12 @@ function injectSandboxEnv(skillDir: string, api: LoggerApi): boolean {
 
     if (!privateKey) {
       api.logger.info('[moltbank] x402_signer_private_key not found — generating EOA signer...');
-      const initResult = run(`MOLTBANK_CREDENTIALS_PATH="${credsPath}" node "./scripts/init-openclaw-signer.mjs"`, {
+      const initResult = run(`"${process.execPath}" "./scripts/init-openclaw-signer.mjs"`, {
         cwd: skillDir,
-        silent: true
+        silent: true,
+        env: {
+          MOLTBANK_CREDENTIALS_PATH: credsPath
+        }
       });
       if (!initResult.ok) {
         api.logger.warn('[moltbank] ✗ could not generate EOA signer: ' + initResult.stderr);
@@ -1210,9 +1225,15 @@ async function runSetup(cfg: MoltbankPluginConfig, api: LoggerApi, options: { au
     api.logger.info('[moltbank] [sandbox 4/10] ensuring sandbox authentication...');
     if (!ensureMoltbankAuth(skillDir, appBaseUrl, api, { waitForApproval: waitForAuth })) {
       if (!waitForAuth) {
-        api.logger.warn('[moltbank] sandbox auth pending — startup continues without blocking channel startup');
-        api.logger.info('[moltbank] setup will finalize automatically after browser approval');
-        api.logger.info('[moltbank] optional immediate check: `openclaw moltbank auth-status`');
+        const pending = readPendingOauthCode(skillDir);
+        if (pending) {
+          api.logger.warn('[moltbank] sandbox auth pending — startup continues without blocking channel startup');
+          api.logger.info('[moltbank] setup will finalize automatically after browser approval');
+          api.logger.info('[moltbank] optional immediate check: `openclaw moltbank auth-status`');
+        } else {
+          api.logger.warn('[moltbank] sandbox auth setup failed before issuing a valid device code');
+          api.logger.warn('[moltbank] review the previous error and rerun `openclaw moltbank setup`');
+        }
         return;
       }
       api.logger.warn('[moltbank] sandbox auth not ready — complete onboarding and run setup again');
@@ -1262,9 +1283,15 @@ async function runSetup(cfg: MoltbankPluginConfig, api: LoggerApi, options: { au
     api.logger.info('[moltbank] [host 5/8] ensuring account onboarding/authentication...');
     if (!ensureMoltbankAuth(skillDir, appBaseUrl, api, { waitForApproval: waitForAuth })) {
       if (!waitForAuth) {
-        api.logger.warn('[moltbank] host auth pending — startup continues without blocking channel startup');
-        api.logger.info('[moltbank] setup will finalize automatically after browser approval');
-        api.logger.info('[moltbank] optional immediate check: `openclaw moltbank auth-status`');
+        const pending = readPendingOauthCode(skillDir);
+        if (pending) {
+          api.logger.warn('[moltbank] host auth pending — startup continues without blocking channel startup');
+          api.logger.info('[moltbank] setup will finalize automatically after browser approval');
+          api.logger.info('[moltbank] optional immediate check: `openclaw moltbank auth-status`');
+        } else {
+          api.logger.warn('[moltbank] host auth setup failed before issuing a valid device code');
+          api.logger.warn('[moltbank] review the previous error and rerun `openclaw moltbank setup`');
+        }
         return;
       }
       api.logger.warn('[moltbank] host auth not ready — complete onboarding and run setup again');
@@ -1438,4 +1465,4 @@ export default function register(api: PluginApi) {
     },
     { commands: ['moltbank'] }
   );
-}
+};
