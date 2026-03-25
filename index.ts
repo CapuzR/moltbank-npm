@@ -62,6 +62,8 @@ interface PluginApi extends LoggerApi {
   registerCli(handler: (args: { program: CliCommandLike }) => void, options: { commands: string[] }): void;
 }
 
+type AuthWaitMode = 'blocking' | 'nonblocking';
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
@@ -555,7 +557,13 @@ function parseFirstJsonObject(output: string): ParsedJsonObject | null {
   return null;
 }
 
-function ensureMoltbankAuth(skillDir: string, appBaseUrl: string, api: LoggerApi): boolean {
+function ensureMoltbankAuth(
+  skillDir: string,
+  appBaseUrl: string,
+  api: LoggerApi,
+  options: { waitForApproval?: boolean } = {}
+): boolean {
+  const waitForApproval = options.waitForApproval ?? true;
   const existing = parseActiveTokenFromCredentials();
   if (existing.ok) {
     api.logger.info(`[moltbank] ✓ credentials.json already available (active org: ${existing.activeOrg})`);
@@ -654,6 +662,13 @@ function ensureMoltbankAuth(skillDir: string, appBaseUrl: string, api: LoggerApi
   if (expiresAt > now) {
     api.logger.info(`[moltbank] 3) Code expires in ~${Math.max(1, Math.ceil((expiresAt - now) / 60))} min`);
   }
+
+  if (!waitForApproval) {
+    api.logger.info('[moltbank] nonblocking startup mode: skipping OAuth polling to keep gateway/channel startup responsive');
+    api.logger.info('[moltbank] once approved, rerun `openclaw moltbank setup` or send another MoltBank command');
+    return false;
+  }
+
   api.logger.info('[moltbank] waiting for approval and polling token...');
 
   const pollTimeoutSeconds = Number(process.env.MOLTBANK_OAUTH_POLL_TIMEOUT_SECONDS ?? 180);
@@ -962,12 +977,13 @@ function recreateSandboxAndRestart(api: LoggerApi) {
 
 // ─── main setup ───────────────────────────────────────────────────────────────
 
-async function runSetup(cfg: MoltbankPluginConfig, api: LoggerApi) {
+async function runSetup(cfg: MoltbankPluginConfig, api: LoggerApi, options: { authWaitMode?: AuthWaitMode } = {}) {
   let hostReady = false;
   const appBaseUrl = getAppBaseUrl(cfg);
   const skillName = getSkillName(cfg);
   const sandbox = isSandboxEnabled();
   const skillDir = getSkillDir(cfg);
+  const waitForAuth = (options.authWaitMode ?? 'blocking') === 'blocking';
 
   api.logger.info(`[moltbank] ══════════════════════════════════════`);
   api.logger.info(`[moltbank] MoltBank plugin setup starting`);
@@ -998,7 +1014,11 @@ async function runSetup(cfg: MoltbankPluginConfig, api: LoggerApi) {
     ensureSkillPermissions(skillDir, api);
 
     api.logger.info('[moltbank] [sandbox 4/10] ensuring sandbox authentication...');
-    if (!ensureMoltbankAuth(skillDir, appBaseUrl, api)) {
+    if (!ensureMoltbankAuth(skillDir, appBaseUrl, api, { waitForApproval: waitForAuth })) {
+      if (!waitForAuth) {
+        api.logger.warn('[moltbank] sandbox auth pending — startup continues without blocking channel startup');
+        return;
+      }
       api.logger.warn('[moltbank] sandbox auth not ready — complete onboarding and run setup again');
       return;
     }
@@ -1044,7 +1064,11 @@ async function runSetup(cfg: MoltbankPluginConfig, api: LoggerApi) {
     ensureSkillPermissions(skillDir, api);
 
     api.logger.info('[moltbank] [host 5/8] ensuring account onboarding/authentication...');
-    if (!ensureMoltbankAuth(skillDir, appBaseUrl, api)) {
+    if (!ensureMoltbankAuth(skillDir, appBaseUrl, api, { waitForApproval: waitForAuth })) {
+      if (!waitForAuth) {
+        api.logger.warn('[moltbank] host auth pending — startup continues without blocking channel startup');
+        return;
+      }
       api.logger.warn('[moltbank] host auth not ready — complete onboarding and run setup again');
       return;
     }
@@ -1125,7 +1149,7 @@ export default function register(api: PluginApi) {
   api.registerService({
     id: 'moltbank-setup',
     start: async () => {
-      await runSetup(cfg, api);
+      await runSetup(cfg, api, { authWaitMode: 'nonblocking' });
     },
     stop: async () => {
       api.logger.info('[moltbank] plugin stopped');
@@ -1143,7 +1167,7 @@ export default function register(api: PluginApi) {
             .description('Re-run full MoltBank setup')
             .action(async () => {
               console.log('Running MoltBank setup...');
-              await runSetup(cfg, { logger: console });
+              await runSetup(cfg, { logger: console }, { authWaitMode: 'blocking' });
             })
         )
         .addCommand(
