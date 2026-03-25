@@ -564,12 +564,7 @@ function parseFirstJsonObject(output: string): ParsedJsonObject | null {
   return null;
 }
 
-function ensureMoltbankAuth(
-  skillDir: string,
-  appBaseUrl: string,
-  api: LoggerApi,
-  options: { waitForApproval?: boolean } = {}
-): boolean {
+function ensureMoltbankAuth(skillDir: string, appBaseUrl: string, api: LoggerApi, options: { waitForApproval?: boolean } = {}): boolean {
   const waitForApproval = options.waitForApproval ?? true;
   const existing = parseActiveTokenFromCredentials();
   if (existing.ok) {
